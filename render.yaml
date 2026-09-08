@@ -17,6 +17,10 @@ services:
         value: production
       - key: CLONYFY_HOSTED
         value: "1"
+      - key: CLONYFY_FAST_CLONE
+        value: "1"
+      - key: CLONYFY_CLONE_CONCURRENCY
+        value: "2"
       # Optional: mount a persistent disk and set CLONYFY_OUTPUT_DIR to that path.
       # - key: CLONYFY_OUTPUT_DIR
       #   value: /var/data/output
@@ -33,6 +37,9 @@ services:
       - key: SHARE_PASSWORD_PEPPER
         sync: false
       - key: APP_URL
+        sync: false
+      # Must be the live Frontend origin (CORS + redirects), e.g. https://www.clonyfy.com
+      - key: FRONTEND_URL
         sync: false
       - key: SMTP_HOST
         sync: false

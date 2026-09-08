@@ -3508,8 +3508,32 @@ async function handleRequest(req, res) {
     try { data = await readCloneFile(outDir, join('captured-pages', resolved.filename)); }
     catch { return json(res, { error: 'Invalid page path' }, 400); }
     if (!data) { res.writeHead(404); res.end('File missing'); return; }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(await rewritePreviewAssetUrls(data.toString('utf8'), outDir));
+    const editorMode = url.searchParams.get('mode') === 'editor';
+    let html = data.toString('utf8');
+    if (editorMode) {
+      html = neutralizeCloneScripts(html);
+      const apiBase = apiPublicUrl(req).replace(/\/$/, '');
+      html = await rewritePreviewAssetUrls(html, outDir, {
+        injectPreviewNav: false,
+        injectScrollReveal: false,
+        baseHref: `${apiBase}/`,
+      });
+      // srcdoc resolves relative URLs against the Frontend origin — force API host.
+      html = html.replace(/(["'(])\/api\/asset\?/g, `$1${apiBase}/api/asset?`);
+      if (html.match(/<head[^>]*>/i)) {
+        html = html.replace(/<head[^>]*>/i, (m) => `${m}<style id="clonyfy-editor-style">[contenteditable="true"]{outline:1px dashed rgba(91,141,239,.55);outline-offset:2px}img.clonyfy-edit-target{cursor:pointer;outline:2px solid transparent}img.clonyfy-edit-target:hover{outline-color:rgba(91,141,239,.7)}</style>`);
+      }
+      if (html.match(/<body\b/i)) {
+        html = html.replace(/<body\b([^>]*)>/i, (m, attrs = '') => {
+          if (/\bcontenteditable\s*=/i.test(attrs)) return m;
+          return `<body${attrs} contenteditable="true">`;
+        });
+      }
+    } else {
+      html = await rewritePreviewAssetUrls(html, outDir);
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(html);
     return;
   }
 
@@ -3590,7 +3614,16 @@ async function handleRequest(req, res) {
       if (!isInsideOutputDir(assetsDir)) return json(res, { error: 'Invalid asset path' }, 400);
       const assetName = `user-${randomUUID().slice(0, 8)}${extensionForAsset(filename, match[1])}`;
       await writeCloneFile(outDir, join('public', '_assets', assetName), bytes, match[1]);
-      json(res, { ok: true, path: `/_assets/${assetName}`, mimeType: match[1], size: bytes.length });
+      const relPath = `_assets/${assetName}`;
+      const previewPath = `/api/asset?outDir=${encodeURIComponent(outDir)}&assetToken=${cloneAssetToken(outDir)}&path=${encodeURIComponent(relPath)}`;
+      const publicBase = apiPublicUrl(req).replace(/\/$/, '');
+      json(res, {
+        ok: true,
+        path: `/_assets/${assetName}`,
+        previewUrl: `${publicBase}${previewPath}`,
+        mimeType: match[1],
+        size: bytes.length,
+      });
     }).catch(() => json(res, { error: 'bad json' }, 400));
     return;
   }
@@ -4074,7 +4107,12 @@ async function handleRequest(req, res) {
     try {
       const { zipName, zipPath } = await buildOutputZip(outDir);
       return json(res, { ok: true, zipPath, folder: OUTPUT_DIR });
-    } catch(err) { return json(res, { error: err.message }, 500); }
+    } catch(err) {
+      const message = err?.message || 'ZIP export failed';
+      if (/paid plan|Upgrade/i.test(message)) return json(res, { error: message }, 403);
+      if (/no captured pages|No clone|missing/i.test(message)) return json(res, { error: message }, 404);
+      return json(res, { error: message }, 500);
+    }
   }
 
   if (req.method === 'GET' && url.pathname === '/api/download-zip') {
