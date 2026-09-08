@@ -198,6 +198,16 @@ const IS_HOSTED = IS_RENDER
   || process.env.NODE_ENV === 'production';
 /** Inline clone only for serverless (no child process). Render/dedicated hosts spawn the CLI so /api/clone returns immediately and the UI can poll. */
 const USE_INLINE_CLONE = IS_SERVERLESS || process.env.CLONYFY_INLINE_CLONE === '1';
+/** Parallel page capture on hosted (1–4). Local default stays 1 for lighter machines. */
+const CLONE_CONCURRENCY = Math.max(1, Math.min(4, parseInt(
+  process.env.CLONYFY_CLONE_CONCURRENCY || (IS_HOSTED ? '2' : '1'),
+  10,
+) || (IS_HOSTED ? 2 : 1)));
+/** Wall-clock limit so jobs cannot spin 60+ minutes with no usable result. */
+const CLONE_DEADLINE_MS = Math.max(
+  5 * 60 * 1000,
+  parseInt(process.env.CLONYFY_CLONE_DEADLINE_MS || String(18 * 60 * 1000), 10) || (18 * 60 * 1000),
+);
 const SERVERLESS_MAX_PAGES = Math.max(1, parseInt(process.env.CLONYFY_SERVERLESS_MAX_PAGES || '500', 10) || 500);
 /** Safety ceiling for Scale "Select all pages" (same-origin deep crawl). Raise on dedicated hosts. */
 const FULL_SITE_MAX_PAGES = Math.max(500, parseInt(process.env.CLONYFY_FULL_SITE_MAX_PAGES || '10000', 10) || 10000);
@@ -1193,8 +1203,10 @@ function contentTypeForPath(filePath) {
   }[ext] || 'application/octet-stream';
 }
 
-async function persistCloneOutput(outDir) {
-  if (!isInsideOutputDir(outDir) || !existsSync(outDir)) return;
+async function persistCloneOutput(outDir, options = {}) {
+  const deferAssets = !!options.deferAssets;
+  const assetsOnly = !!options.assetsOnly;
+  if (!isInsideOutputDir(outDir) || !existsSync(outDir)) return { uploaded: 0, total: 0 };
   const files = [];
   const addFile = (rel) => {
     const abs = join(outDir, rel);
@@ -1216,11 +1228,22 @@ async function persistCloneOutput(outDir) {
   walk(join('public', '_assets'));
 
   let uploaded = 0;
+  let skipped = 0;
   let fallbackSaved = 0;
   const failures = [];
+  // Hosted Storage uploads time out on huge binaries — preview only needs HTML + modest assets.
+  const maxAssetUploadBytes = IS_HOSTED ? 8 * 1024 * 1024 : 50 * 1024 * 1024;
   const uploadOne = async (file) => {
     const size = statSync(file.abs).size;
-    if (size > 50 * 1024 * 1024) return;
+    const isCritical = file.rel === 'route-map.json' || file.rel === 'manifest.json' || file.rel.startsWith('captured-pages/');
+    if (size > maxAssetUploadBytes && !isCritical) {
+      skipped++;
+      return;
+    }
+    if (size > 50 * 1024 * 1024) {
+      skipped++;
+      return;
+    }
     const storagePath = cloneStoragePath(outDir, file.rel);
     const data = readFileSync(file.abs);
     try {
@@ -1228,7 +1251,7 @@ async function persistCloneOutput(outDir) {
       uploaded++;
     } catch (err) {
       failures.push(`${file.rel}: ${err?.message || err}`);
-      if (file.rel === 'route-map.json' || file.rel === 'manifest.json' || file.rel.startsWith('captured-pages/')) {
+      if (isCritical) {
         try {
           await saveCloneTextFile(storagePath, data.toString('utf8'));
           fallbackSaved++;
@@ -1245,29 +1268,48 @@ async function persistCloneOutput(outDir) {
   };
 
   const criticalFiles = files.filter(file => file.rel === 'route-map.json' || file.rel === 'manifest.json' || file.rel.startsWith('captured-pages/'));
-  const assetFiles = files.filter(file => !criticalFiles.includes(file));
-  await runLimited(criticalFiles, 8);
-  try {
-    await saveCloneTextFile(cloneFileListStoragePath(outDir), JSON.stringify(criticalFiles.map(file => ({
-      rel: file.rel,
-      size: statSync(file.abs).size,
-      contentType: contentTypeForPath(file.rel),
-    }))));
-  } catch (err) {
-    failures.push(`__files.json critical: ${err?.message || err}`);
+  const assetFiles = files.filter(file => !criticalFiles.includes(file))
+    // Prefer smaller CSS/fonts/icons first so preview CSS resolves sooner.
+    .sort((a, b) => {
+      try { return statSync(a.abs).size - statSync(b.abs).size; } catch { return 0; }
+    });
+
+  if (!assetsOnly) {
+    await runLimited(criticalFiles, 8);
+    try {
+      await saveCloneTextFile(cloneFileListStoragePath(outDir), JSON.stringify(criticalFiles.map(file => ({
+        rel: file.rel,
+        size: statSync(file.abs).size,
+        contentType: contentTypeForPath(file.rel),
+      }))));
+    } catch (err) {
+      failures.push(`__files.json critical: ${err?.message || err}`);
+    }
   }
-  await runLimited(assetFiles, 8);
-  try {
-    await saveCloneTextFile(cloneFileListStoragePath(outDir), JSON.stringify(files.map(file => ({
-      rel: file.rel,
-      size: statSync(file.abs).size,
-      contentType: contentTypeForPath(file.rel),
-    }))));
-  } catch (err) {
-    failures.push(`__files.json: ${err?.message || err}`);
+
+  const finishAssets = async () => {
+    await runLimited(assetFiles, IS_HOSTED ? 6 : 8);
+    try {
+      await saveCloneTextFile(cloneFileListStoragePath(outDir), JSON.stringify(files.map(file => ({
+        rel: file.rel,
+        size: statSync(file.abs).size,
+        contentType: contentTypeForPath(file.rel),
+      }))));
+    } catch (err) {
+      failures.push(`__files.json: ${err?.message || err}`);
+    }
+    console.log(`[clone storage] uploaded ${uploaded}/${files.length} files, skipped=${skipped}, fallback=${fallbackSaved} for ${outDir}`);
+    if (failures.length) console.warn(`[clone storage] ${failures.slice(0, 5).join(' | ')}`);
+  };
+
+  if (deferAssets && !assetsOnly) {
+    console.log(`[clone storage] critical ${criticalFiles.length} files uploaded; deferring ${assetFiles.length} assets for ${outDir}`);
+    void finishAssets().catch((err) => console.warn(`[clone storage] background assets failed: ${err?.message || err}`));
+    return { uploaded, total: files.length, deferred: assetFiles.length };
   }
-  console.log(`[clone storage] uploaded ${uploaded}/${files.length} files, fallback=${fallbackSaved} for ${outDir}`);
-  if (failures.length) console.warn(`[clone storage] ${failures.slice(0, 5).join(' | ')}`);
+
+  await finishAssets();
+  return { uploaded, total: files.length, deferred: 0 };
 }
 
 async function readCloneFile(outDir, relPath) {
@@ -1319,8 +1361,23 @@ function jobSnapshot(job) {
   };
 }
 
-function persistJob(job) {
-  saveCloneTextFile(jobStoragePath(job.id), JSON.stringify(jobSnapshot(job))).catch(() => {});
+const persistJobTimers = new Map();
+function persistJob(job, { force = false } = {}) {
+  const id = job?.id;
+  if (!id) return;
+  const write = () => {
+    persistJobTimers.delete(id);
+    saveCloneTextFile(jobStoragePath(id), JSON.stringify(jobSnapshot(job))).catch(() => {});
+  };
+  if (force || job.status !== 'running') {
+    const pending = persistJobTimers.get(id);
+    if (pending) clearTimeout(pending);
+    persistJobTimers.delete(id);
+    write();
+    return;
+  }
+  if (persistJobTimers.has(id)) return;
+  persistJobTimers.set(id, setTimeout(write, 2500));
 }
 
 async function readPersistedJob(id) {
@@ -3675,7 +3732,7 @@ async function handleRequest(req, res) {
         job.logs.push(`[WARN] Page limit capped to ${job.maxPages} on serverless deployment. Set CLONYFY_SERVERLESS_MAX_PAGES or run on Render for larger clones.`);
       }
       jobs.set(id, job);
-      persistJob(job);
+      persistJob(job, { force: true });
       const offloadQueue = IS_SERVERLESS
         ? createCloneOffloadQueue(outDir, (msg) => {
           job.logs.push(`[WARN] ${msg}`);
@@ -3692,29 +3749,39 @@ async function handleRequest(req, res) {
         });
       } catch (dbErr) {
         job.logs.push(`[WARN] Could not create initial clone record: ${dbErr?.message || dbErr}`);
-        persistJob(job);
+        persistJob(job, { force: true });
       }
 
       if (cloneUser) audit(cloneUser.id, cloneUser.name, 'clone_start', targetUrl, ip);
 
-      const args = ['clone', targetUrl, '--out', outDir, '--max-pages', String(maxPages), '--depth', String(depth), '--concurrency', '1'];
+      const args = ['clone', targetUrl, '--out', outDir, '--max-pages', String(maxPages), '--depth', String(depth), '--concurrency', String(CLONE_CONCURRENCY)];
       if (ignoreRobots) args.push('--ignore-robots');
       if (fullSite) args.push('--full-site');
 
       const finalizeCloneJob = async (code, signal = null) => {
-        if (code !== 0) {
-          job.logs.push(`[ERROR] Clone process exited with code ${code ?? 'null'}${signal ? ` signal ${signal}` : ''}`);
+        let exitCode = code;
+        if (exitCode !== 0) {
+          job.logs.push(`[ERROR] Clone process exited with code ${exitCode ?? 'null'}${signal ? ` signal ${signal}` : ''}`);
+          // Salvage partial captures instead of discarding a long crawl with zero result.
+          try {
+            const salvaged = await countClonePagesBestEffort(outDir);
+            if (salvaged > 0) {
+              job.logs.push(`[WARN] Salvaging ${salvaged} captured page(s) after non-zero exit.`);
+              exitCode = 0;
+              if (job.pages == null || job.pages === 0) job.pages = salvaged;
+            }
+          } catch {}
         }
-        job.status = code === 0 ? 'saving' : 'error';
-        persistJob(job);
-        if (code === 0) { invalidateOutputsCache(); }
+        job.status = exitCode === 0 ? 'saving' : 'error';
+        persistJob(job, { force: true });
+        if (exitCode === 0) { invalidateOutputsCache(); }
         const findNum = (pat) => {
           const line = job.logs.find((l) => l.includes(pat));
           if (!line) return null;
           const m = line.match(/:\s*(\d+)/);
           return m ? parseInt(m[1], 10) : null;
         };
-        job.pages = findNum('Pages      :') ?? findNum('Pages       :') ?? findNum('Pages:') ?? null;
+        job.pages = findNum('Pages      :') ?? findNum('Pages       :') ?? findNum('Pages:') ?? job.pages ?? null;
         job.apiRoutes = findNum('API routes :') ?? findNum('API routes  :') ?? findNum('API routes:') ?? 0;
         job.assets = findNum('Total unique assets saved') ?? findNum('Assets      :') ?? findNum('Assets       :') ?? findNum('Assets:') ?? 0;
         if (job.pages === null || job.pages === 0) {
@@ -3730,14 +3797,15 @@ async function handleRequest(req, res) {
           } catch { if (job.pages === null) job.pages = 0; }
         }
         const completedAt = new Date().toISOString();
-        let cloneReadable = code !== 0 ? { ok: false, error: 'Clone process failed' } : null;
-        if (code === 0) {
+        let cloneReadable = exitCode !== 0 ? { ok: false, error: 'Clone process failed' } : null;
+        if (exitCode === 0) {
           try {
             if (job.offloadQueue) await job.offloadQueue.flush();
-            await persistCloneOutput(job.outDir);
+            // Critical HTML first so preview works; asset upload continues in background on hosted.
+            await persistCloneOutput(job.outDir, { deferAssets: IS_HOSTED });
             cloneReadable = await verifyCloneReadableWithRetry(job.outDir);
             if (!cloneReadable.ok) {
-              await persistCloneOutput(job.outDir);
+              await persistCloneOutput(job.outDir, { deferAssets: false });
               cloneReadable = await verifyCloneReadableWithRetry(job.outDir, 3);
             }
             // On Render/hosted, confirm Storage has route-map so preview survives disk wipe.
@@ -3745,7 +3813,7 @@ async function handleRequest(req, res) {
               const storedMap = await loadRouteMapAsync(job.outDir);
               if (!storedMap) {
                 job.logs.push('[WARN] route-map not readable after persist — retrying storage upload');
-                await persistCloneOutput(job.outDir);
+                await persistCloneOutput(job.outDir, { deferAssets: false });
                 cloneReadable = await verifyCloneReadableWithRetry(job.outDir, 3);
               }
             }
@@ -3777,7 +3845,7 @@ async function handleRequest(req, res) {
         try {
           await insertClone({
             id: job.id, userId: job.userId, userName: job.userName,
-            url: job.url, outDir: job.outDir, status: code === 0 && cloneReadable?.ok ? 'done' : 'error',
+            url: job.url, outDir: job.outDir, status: exitCode === 0 && cloneReadable?.ok ? 'done' : 'error',
             pages: job.pages, assets: job.assets, apiRoutes: job.apiRoutes,
             startedAt: job.startedAt, completedAt,
           });
@@ -3785,14 +3853,14 @@ async function handleRequest(req, res) {
         } catch (dbErr) {
           job.logs.push(`[WARN] Could not save clone record: ${dbErr?.message || dbErr}`);
         }
-        const cloneSucceeded = code === 0 && cloneReadable?.ok;
-        if (code === 0) {
+        const cloneSucceeded = exitCode === 0 && cloneReadable?.ok;
+        if (exitCode === 0) {
           job.status = cloneSucceeded ? 'done' : 'error';
           if (!cloneRecordSaved && cloneReadable?.ok) {
             job.logs.push('[WARN] Clone finished, but history persistence failed. Preview and export may still work from local output.');
           }
         }
-        persistJob(job);
+        persistJob(job, { force: true });
         if (!cloneSucceeded) {
           try {
             const errorLines = job.logs.filter(l => l.startsWith('[ERROR]') || l.toLowerCase().includes('error'));
@@ -3827,31 +3895,42 @@ async function handleRequest(req, res) {
       if (USE_INLINE_CLONE) {
         // Never block the HTTP response on the crawl — Frontend needs job.id immediately to poll.
         void (async () => {
+          const deadlineTimer = setTimeout(() => {
+            job.logs.push(`[WARN] Clone deadline (${Math.round(CLONE_DEADLINE_MS / 60000)} min) reached — stopping and salvaging captured pages.`);
+            persistJob(job, { force: true });
+          }, CLONE_DEADLINE_MS);
           try {
-            const result = await runClone({
-              url: targetUrl,
-              out: outDir,
-              maxPages: parseInt(maxPages, 10),
-              depth: parseInt(depth, 10) || 3,
-              concurrency: 1,
-              ignoreRobots: !!ignoreRobots,
-              verbose: false,
-              fullSite,
-            }, {
-              onLog: (line) => {
-                if (line) job.logs.push(line);
-                persistJob(job);
-              },
-              onArtifactWritten: offloadQueue
-                ? (event) => offloadQueue.offload(event)
-                : undefined,
-            });
+            const result = await Promise.race([
+              runClone({
+                url: targetUrl,
+                out: outDir,
+                maxPages: parseInt(maxPages, 10),
+                depth: parseInt(depth, 10) || 3,
+                concurrency: CLONE_CONCURRENCY,
+                ignoreRobots: !!ignoreRobots,
+                verbose: false,
+                fullSite,
+              }, {
+                onLog: (line) => {
+                  if (line) job.logs.push(line);
+                  persistJob(job);
+                },
+                onArtifactWritten: offloadQueue
+                  ? (event) => offloadQueue.offload(event)
+                  : undefined,
+              }),
+              new Promise((_, reject) => {
+                setTimeout(() => reject(new Error(`Clone deadline exceeded (${Math.round(CLONE_DEADLINE_MS / 60000)} min)`)), CLONE_DEADLINE_MS);
+              }),
+            ]);
+            clearTimeout(deadlineTimer);
             if (offloadQueue) await offloadQueue.flush();
             job.pages = result.pages;
             job.assets = result.assets;
             job.apiRoutes = result.apiRoutes;
             await finalizeCloneJob(0);
           } catch (err) {
+            clearTimeout(deadlineTimer);
             const msg = String(err?.message || err);
             job.logs.push(`[ERROR] ${msg}`);
             if (job.offloadQueue) {
@@ -3873,7 +3952,8 @@ async function handleRequest(req, res) {
             } catch {}
             if (salvageable > 0) {
               const diskFull = /ENOSPC|no space left/i.test(msg);
-              job.logs.push(`[WARN] ${diskFull ? 'Ran out of temporary storage during finalization' : 'Finalization failed'} — salvaging ${salvageable} captured page(s) so your clone is still usable.`);
+              const deadline = /deadline/i.test(msg);
+              job.logs.push(`[WARN] ${deadline ? 'Hit clone deadline' : diskFull ? 'Ran out of temporary storage during finalization' : 'Finalization failed'} — salvaging ${salvageable} captured page(s) so your clone is still usable.`);
               if (job.offloadQueue) await job.offloadQueue.flush();
               await finalizeCloneJob(0);
             } else {
@@ -3882,10 +3962,22 @@ async function handleRequest(req, res) {
           }
         })();
       } else {
+        const childEnv = {
+          ...process.env,
+          ...(IS_HOSTED && !process.env.CLONYFY_FAST_CLONE ? { CLONYFY_FAST_CLONE: '1' } : {}),
+        };
         const proc = spawn(process.execPath, [CLI, ...args], {
           cwd: __dirname,
-          env: process.env,
+          env: childEnv,
         });
+        job.proc = proc;
+        const deadlineTimer = setTimeout(() => {
+          if (!isActiveJob(job)) return;
+          job.logs.push(`[WARN] Clone deadline (${Math.round(CLONE_DEADLINE_MS / 60000)} min) reached — stopping crawl and salvaging pages.`);
+          persistJob(job, { force: true });
+          try { proc.kill('SIGTERM'); } catch {}
+          setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 12_000);
+        }, CLONE_DEADLINE_MS);
         proc.stdout.on('data', (c) => {
           c.toString().split('\n').filter(Boolean).forEach((l) => job.logs.push(l));
           persistJob(job);
@@ -3895,10 +3987,11 @@ async function handleRequest(req, res) {
           persistJob(job);
         });
         proc.on('close', (code, signal) => {
+          clearTimeout(deadlineTimer);
           finalizeCloneJob(code, signal).catch((err) => {
             job.status = 'error';
             job.logs.push(`[ERROR] Could not finalize clone: ${err?.message || err}`);
-            persistJob(job);
+            persistJob(job, { force: true });
           });
         });
       }

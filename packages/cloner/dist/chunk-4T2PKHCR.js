@@ -872,9 +872,18 @@ function normalizePageUrl(input, baseUrl) {
 
 // src/serverlessBudget.ts
 function isServerlessRuntime(env = process.env, cwd = process.cwd()) {
-  return env.VERCEL === "1" || env.VERCEL === "true" || env.CLONYFY_SERVERLESS === "1" || !!env.VERCEL_ENV || !!env.AWS_LAMBDA_FUNCTION_NAME || !!env.LAMBDA_TASK_ROOT || cwd.startsWith("/var/task");
+  return env.VERCEL === "1" || env.VERCEL === "true" || env.CLONYFY_SERVERLESS === "1" || env.CLONYFY_SERVERLESS === "true" || !!env.VERCEL_ENV || !!env.AWS_LAMBDA_FUNCTION_NAME || !!env.LAMBDA_TASK_ROOT || cwd.startsWith("/var/task");
+}
+function isFastCloneProfile(env = process.env, cwd = process.cwd()) {
+  if (env.CLONYFY_FAST_CLONE === "0" || env.CLONYFY_FAST_CLONE === "false") return false;
+  if (env.CLONYFY_FAST_CLONE === "1" || env.CLONYFY_FAST_CLONE === "true") return true;
+  if (isServerlessRuntime(env, cwd)) return true;
+  if (env.RENDER || env.RENDER_EXTERNAL_URL) return true;
+  if (env.CLONYFY_HOSTED === "1" || env.CLONYFY_HOSTED === "true") return true;
+  return false;
 }
 var IS_SERVERLESS = isServerlessRuntime();
+var IS_FAST_CLONE = isFastCloneProfile();
 var SERVERLESS_ASSET_BUDGET_BYTES = (IS_SERVERLESS ? 100 : Infinity) * 1024 * 1024;
 var assetBytesWritten = 0;
 function resetServerlessAssetBudget() {
@@ -1334,7 +1343,7 @@ window.hbspt = window.hbspt || {};
 window.hbspt.forms = window.hbspt.forms || {};
 window.hbspt.forms.create = window.hbspt.forms.create || function () {};
 `;
-var IS_SERVERLESS2 = process.env.VERCEL === "1" || process.env.VERCEL === "true";
+var IS_SERVERLESS2 = IS_FAST_CLONE;
 var NAVIGATION_TIMEOUT = IS_SERVERLESS2 ? 12e3 : 3e4;
 var ROUTE_FETCH_TIMEOUT = IS_SERVERLESS2 ? 5e3 : 15e3;
 var USER_AGENT2 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -2962,15 +2971,15 @@ var NON_PAGE_EXTS2 = /* @__PURE__ */ new Set([
   ".xml",
   ".zip"
 ]);
-var NAV_DELAY_MS = IS_SERVERLESS ? 50 : 250;
-var PAGE_CAPTURE_TIMEOUT = IS_SERVERLESS ? 35e3 : 18e4;
+var NAV_DELAY_MS = IS_FAST_CLONE ? 50 : 250;
+var PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 45e3 : 18e4;
 var USER_AGENT3 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-var STATIC_ASSET_LIMIT = IS_SERVERLESS ? 80 : 400;
-var STATIC_ASSET_TIMEOUT = IS_SERVERLESS ? 8e3 : 1e4;
-var STATIC_PAGE_TIMEOUT = IS_SERVERLESS ? 12e3 : 15e3;
-var STATIC_ASSET_MAX_BYTES = (IS_SERVERLESS ? 4 : 50) * 1024 * 1024;
-var STATIC_ASSET_CONCURRENCY = IS_SERVERLESS ? 4 : 12;
-var STATIC_PAGE_ASSET_TIMEOUT = IS_SERVERLESS ? 4e3 : 6e4;
+var STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 120 : 400;
+var STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 8e3 : 1e4;
+var STATIC_PAGE_TIMEOUT = IS_FAST_CLONE ? 12e3 : 15e3;
+var STATIC_ASSET_MAX_BYTES = (IS_FAST_CLONE ? 4 : 50) * 1024 * 1024;
+var STATIC_ASSET_CONCURRENCY = IS_FAST_CLONE ? 6 : 12;
+var STATIC_PAGE_ASSET_TIMEOUT = IS_FAST_CLONE ? 8e3 : 6e4;
 function shouldUseStaticFirstServerless(env = process.env, serverless = IS_SERVERLESS) {
   if (!serverless) return false;
   if (env.CLONYFY_BROWSER_FIRST === "1") return false;
@@ -12222,6 +12231,8 @@ Next steps:`);
 
 // src/runClone.ts
 var IS_SERVERLESS3 = isServerlessRuntime();
+var IS_FAST_CLONE2 = isFastCloneProfile();
+var SKIP_NEXT_GEN = IS_SERVERLESS3 || IS_FAST_CLONE2 || process.env.CLONYFY_SKIP_NEXT === "1" || process.env.CLONYFY_SKIP_NEXT === "true";
 async function runClone(options, events = {}) {
   const opts = {
     ...options,
@@ -12387,12 +12398,12 @@ Total unique assets saved: ${uniqueAssets.size}`);
     const manifestPath = join6(opts.out, "manifest.json");
     writeFileSync5(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
     await notifyArtifact({ relPath: "manifest.json", absPath: manifestPath, kind: "manifest" });
-    if (!IS_SERVERLESS3) {
+    if (!SKIP_NEXT_GEN) {
       logger.info("\nGenerating Next.js app...");
       const fullManifest = { ...manifest, pages: uniqueRecords };
       await generateNextApp(opts.out, fullManifest, apiRoutes);
     } else {
-      logger.info("\nSkipping Next.js project generation on serverless (preview uses captured pages directly).");
+      logger.info("\nSkipping Next.js project generation on hosted/fast clone (preview uses captured pages directly).");
     }
     logger.info("\n=== DONE ===");
     logger.info(`Output dir  : ${opts.out}`);
@@ -12462,4 +12473,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-OY5JEAM4.js.map
+//# sourceMappingURL=chunk-4T2PKHCR.js.map

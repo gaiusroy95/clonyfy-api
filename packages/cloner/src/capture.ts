@@ -6,7 +6,11 @@ import type { BrowserContext, Page } from 'playwright';
 import type { ArtifactWrittenEvent, AssetEntry, NetworkEntry, PageRecord } from './types.js';
 import { logger } from './logger.js';
 import { normalizePageUrl } from './pageUrls.js';
-import { reserveServerlessAssetBytes, SERVERLESS_ASSET_BUDGET_BYTES } from './serverlessBudget.js';
+import {
+  IS_FAST_CLONE,
+  reserveServerlessAssetBytes,
+  SERVERLESS_ASSET_BUDGET_BYTES,
+} from './serverlessBudget.js';
 import {
   ensurePlaceholderAsset,
   PLACEHOLDER_IMAGE_BODY,
@@ -166,11 +170,12 @@ window.hbspt.forms = window.hbspt.forms || {};
 window.hbspt.forms.create = window.hbspt.forms.create || function () {};
 `;
 
-const IS_SERVERLESS = process.env.VERCEL === '1' || process.env.VERCEL === 'true';
+/** Fast budgets on Render/hosted + serverless; full desktop profile only on local deep clones. */
+const IS_SERVERLESS = IS_FAST_CLONE;
 const NAVIGATION_TIMEOUT = IS_SERVERLESS ? 12_000 : 30_000;
 const ROUTE_FETCH_TIMEOUT = IS_SERVERLESS ? 5_000 : 15_000;
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-const MAX_ASSET_BYTES = (IS_SERVERLESS ? 4 : 50) * 1024 * 1024; // Keep serverless clones inside Vercel limits.
+const MAX_ASSET_BYTES = (IS_SERVERLESS ? 4 : 50) * 1024 * 1024; // Cap large media so hosted persist finishes.
 const MAX_CSS_BYTES = (IS_SERVERLESS ? 3 : 25) * 1024 * 1024; // CSS bundles can be larger than media icons/fonts.
 const SERVERLESS_DOM_ASSET_CAP = 220; // Shopify homepage alone has 50+ images + fonts/videos.
 // Upper bound on CSS we scan for url()/image-set()/@import references. The old

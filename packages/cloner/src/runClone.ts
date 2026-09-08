@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { resolve, join } from 'path';
 import { checkRobots } from './robots.js';
-import { crawl, isServerlessRuntime } from './crawler.js';
+import { crawl, isFastCloneProfile, isServerlessRuntime } from './crawler.js';
 import { rewriteHtml } from './rewriter.js';
 import { analyzeTraffic } from './analyzer.js';
 import { generateNextApp, safeName } from './generator.js';
@@ -9,6 +9,11 @@ import { initLogger, logger, setLogSink } from './logger.js';
 import type { ArtifactWrittenEvent, AssetEntry, ClonerOptions, Manifest } from './types.js';
 
 const IS_SERVERLESS = isServerlessRuntime();
+const IS_FAST_CLONE = isFastCloneProfile();
+const SKIP_NEXT_GEN = IS_SERVERLESS
+  || IS_FAST_CLONE
+  || process.env.CLONYFY_SKIP_NEXT === '1'
+  || process.env.CLONYFY_SKIP_NEXT === 'true';
 
 export interface CloneRunEvents {
   onLog?: (line: string) => void;
@@ -207,12 +212,12 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
     await notifyArtifact({ relPath: 'manifest.json', absPath: manifestPath, kind: 'manifest' });
 
-    if (!IS_SERVERLESS) {
+    if (!SKIP_NEXT_GEN) {
       logger.info('\nGenerating Next.js app...');
       const fullManifest: Manifest = { ...manifest, pages: uniqueRecords };
       await generateNextApp(opts.out, fullManifest, apiRoutes);
     } else {
-      logger.info('\nSkipping Next.js project generation on serverless (preview uses captured pages directly).');
+      logger.info('\nSkipping Next.js project generation on hosted/fast clone (preview uses captured pages directly).');
     }
 
     logger.info('\n=== DONE ===');

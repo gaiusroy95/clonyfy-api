@@ -11,14 +11,19 @@ import {
   isLocalePrefixedPath,
   shouldSkipLocaleVariant,
 } from './localePaths.js';
-import { IS_SERVERLESS, isServerlessRuntime, resetServerlessAssetBudget, reserveServerlessAssetBytes, SERVERLESS_ASSET_BUDGET_BYTES } from './serverlessBudget.js';
+import {
+  IS_FAST_CLONE,
+  IS_SERVERLESS,
+  resetServerlessAssetBudget,
+  reserveServerlessAssetBytes,
+  SERVERLESS_ASSET_BUDGET_BYTES,
+} from './serverlessBudget.js';
 import type { ArtifactWrittenEvent, AssetEntry, ClonerOptions, PageRecord } from './types.js';
 
 export { isLocaleOnlyPath, isLocalePrefixedPath, shouldSkipLocaleVariant } from './localePaths.js';
+export { isFastCloneProfile, isServerlessRuntime } from './serverlessBudget.js';
 
 type ChromiumLauncher = typeof import('playwright-core').chromium;
-
-export { isServerlessRuntime } from './serverlessBudget.js';
 
 const NON_PAGE_EXTS = new Set([
   '.7z','.aac','.avi','.avif','.bin','.bmp','.css','.csv','.doc','.docx',
@@ -27,15 +32,15 @@ const NON_PAGE_EXTS = new Set([
   '.pptx','.rar','.rss','.svg','.tar','.tgz','.ttf','.txt','.wav','.webm',
   '.webp','.woff','.woff2','.xls','.xlsx','.xml','.zip',
 ]);
-const NAV_DELAY_MS = IS_SERVERLESS ? 50 : 250;
-const PAGE_CAPTURE_TIMEOUT = IS_SERVERLESS ? 35_000 : 180_000;
+const NAV_DELAY_MS = IS_FAST_CLONE ? 50 : 250;
+const PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 45_000 : 180_000;
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-const STATIC_ASSET_LIMIT = IS_SERVERLESS ? 80 : 400;
-const STATIC_ASSET_TIMEOUT = IS_SERVERLESS ? 8_000 : 10_000;
-const STATIC_PAGE_TIMEOUT = IS_SERVERLESS ? 12_000 : 15_000;
-const STATIC_ASSET_MAX_BYTES = (IS_SERVERLESS ? 4 : 50) * 1024 * 1024;
-const STATIC_ASSET_CONCURRENCY = IS_SERVERLESS ? 4 : 12;
-const STATIC_PAGE_ASSET_TIMEOUT = IS_SERVERLESS ? 4_000 : 60_000;
+const STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 120 : 400;
+const STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 8_000 : 10_000;
+const STATIC_PAGE_TIMEOUT = IS_FAST_CLONE ? 12_000 : 15_000;
+const STATIC_ASSET_MAX_BYTES = (IS_FAST_CLONE ? 4 : 50) * 1024 * 1024;
+const STATIC_ASSET_CONCURRENCY = IS_FAST_CLONE ? 6 : 12;
+const STATIC_PAGE_ASSET_TIMEOUT = IS_FAST_CLONE ? 8_000 : 60_000;
 export function shouldUseStaticFirstServerless(
   env: NodeJS.ProcessEnv = process.env,
   serverless = IS_SERVERLESS,

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { isServerlessRuntime, isProbablyHtmlDocument, prioritizeSitemapUrls, shouldUseBundledChromium, shouldUseStaticFirstServerless, systemBrowserChannel } from '../crawler.js';
+import { isServerlessRuntime, isProbablyHtmlDocument, prioritizeSitemapUrls, shouldUseBundledChromium, shouldUseStaticFirstServerless, systemBrowserChannel, isFastCloneProfile } from '../crawler.js';
 
 let tempDir = '';
 
@@ -51,6 +51,23 @@ describe('isServerlessRuntime', () => {
   it('detects bundled serverless task paths', () => {
     expect(isServerlessRuntime({}, '/var/task')).toBe(true);
     expect(isServerlessRuntime({}, '/var/task/packages/cloner')).toBe(true);
+  });
+});
+
+describe('isFastCloneProfile', () => {
+  it('treats Render and hosted markers as fast', () => {
+    expect(isFastCloneProfile({ RENDER: 'true' }, '/repo')).toBe(true);
+    expect(isFastCloneProfile({ RENDER_EXTERNAL_URL: 'https://x.onrender.com' }, '/repo')).toBe(true);
+    expect(isFastCloneProfile({ CLONYFY_HOSTED: '1' }, '/repo')).toBe(true);
+    expect(isFastCloneProfile({ CLONYFY_FAST_CLONE: '1' }, '/repo')).toBe(true);
+  });
+
+  it('allows opting out of fast mode', () => {
+    expect(isFastCloneProfile({ RENDER: 'true', CLONYFY_FAST_CLONE: '0' }, '/repo')).toBe(false);
+  });
+
+  it('does not force fast mode on plain local env', () => {
+    expect(isFastCloneProfile({}, '/repo')).toBe(false);
   });
 });
 
