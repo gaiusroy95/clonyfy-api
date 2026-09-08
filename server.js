@@ -196,7 +196,8 @@ const IS_SERVERLESS = process.env.CLONYFY_SERVERLESS === '1' || process.env.CLON
 const IS_HOSTED = IS_RENDER
   || process.env.CLONYFY_HOSTED === '1'
   || process.env.NODE_ENV === 'production';
-const USE_INLINE_CLONE = IS_SERVERLESS || process.env.CLONYFY_INLINE_CLONE === '1';
+const USE_INLINE_CLONE =
+  IS_SERVERLESS || process.env.CLONYFY_INLINE_CLONE === '1' || IS_RENDER;
 const SERVERLESS_MAX_PAGES = Math.max(1, parseInt(process.env.CLONYFY_SERVERLESS_MAX_PAGES || '500', 10) || 500);
 /** Safety ceiling for Scale "Select all pages" (same-origin deep crawl). Raise on dedicated hosts. */
 const FULL_SITE_MAX_PAGES = Math.max(500, parseInt(process.env.CLONYFY_FULL_SITE_MAX_PAGES || '10000', 10) || 10000);
@@ -965,6 +966,28 @@ async function verifyCloneReadableWithRetry(outDir, attempts = 5) {
     }
   }
   return last;
+}
+
+/** Best-effort page count from disk or persisted storage (route-map / captured-pages). */
+async function countClonePagesBestEffort(outDir) {
+  try {
+    const readable = await verifyCloneReadable(outDir);
+    if (readable?.ok && readable.pages > 0) return readable.pages;
+  } catch {}
+  try {
+    const pagesDir = join(outDir, 'captured-pages');
+    if (existsSync(pagesDir)) {
+      const n = readdirSync(pagesDir).filter(
+        (f) => f.endsWith('.html') && f !== '__login__.html' && f !== '__register__.html',
+      ).length;
+      if (n > 0) return n;
+    }
+  } catch {}
+  try {
+    const map = (await loadRouteMapAsync(outDir)) || (await inferRouteMapFromCapturedPages(outDir));
+    if (map && Object.keys(map).length) return Object.keys(map).length;
+  } catch {}
+  return 0;
 }
 
 const _fileCache = new Map();
@@ -3137,29 +3160,57 @@ async function handleRequest(req, res) {
     for (const c of userClones.filter(c => c.out_dir)) {
       let status = c.status;
       let pages = c.pages;
-      if (status === 'done' && !fast) {
-        const readable = await verifyCloneReadable(c.out_dir).catch(err => ({ ok: false, error: err?.message || String(err) }));
-        if (!readable.ok) {
-          status = 'error';
-          pages = 0;
-          updateCloneStatus({ id: c.id, status: 'error', pages: 0 }).catch(() => {});
-        } else if (readable.pages && readable.pages !== pages) {
-          pages = readable.pages;
-          updateCloneStatus({ id: c.id, pages }).catch(() => {});
+      const startedMs = Date.parse(String(c.started_at || '')) || 0;
+      const ageMs = startedMs ? Date.now() - startedMs : 0;
+      const liveJob = jobs.get(c.id);
+      if (
+        (status === 'running' || status === 'queued' || status === 'saving') &&
+        (!liveJob || !isActiveJob(liveJob)) &&
+        ageMs > 30 * 60 * 1000
+      ) {
+        status = 'error';
+        updateCloneStatus({
+          id: c.id,
+          status: 'error',
+          completedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
+      if (!fast && (status === 'done' || status === 'error' || status === 'saving')) {
+        try {
+          const readable = await verifyCloneReadable(c.out_dir);
+          if (readable.ok) {
+            status = 'done';
+            if (readable.pages > 0 && readable.pages !== pages) {
+              pages = readable.pages;
+              updateCloneStatus({ id: c.id, status: 'done', pages }).catch(() => {});
+            }
+          } else if ((Number(pages) || 0) <= 0) {
+            // Recover page count from route-map / storage without wiping history.
+            const recovered = await countClonePagesBestEffort(c.out_dir);
+            if (recovered > 0) {
+              pages = recovered;
+              status = 'done';
+              updateCloneStatus({ id: c.id, status: 'done', pages: recovered }).catch(() => {});
+            }
+            // If still unreadable, keep DB values — never force pages:0 on list.
+          }
+        } catch {
+          /* keep stored metrics */
         }
       }
       normalized.push({
-      id: c.id,
-      name: c.out_dir.split(/[\\/]/).pop(),
-      dir: c.out_dir,
-      targetOrigin: c.url,
-      capturedAt: c.completed_at || c.started_at,
-      status,
-      pages,
-      assets: c.assets,
-      apiRoutes: c.api_routes,
-      ...(localByDir[c.out_dir] || {}),
-      label: labelByDir[c.out_dir] || null,
+        id: c.id,
+        name: c.out_dir.split(/[\\/]/).pop(),
+        dir: c.out_dir,
+        targetOrigin: c.url,
+        capturedAt: c.completed_at || c.started_at,
+        ...(localByDir[c.out_dir] || {}),
+        // Prefer DB/recovered metrics over local folder metadata (local may omit pages).
+        status,
+        pages,
+        assets: c.assets,
+        apiRoutes: c.api_routes,
+        label: labelByDir[c.out_dir] || null,
       });
     }
     return json(res, normalized);
@@ -3610,16 +3661,20 @@ async function handleRequest(req, res) {
           const m = line.match(/:\s*(\d+)/);
           return m ? parseInt(m[1], 10) : null;
         };
-        job.pages = findNum('Pages      :') ?? findNum('Pages       :') ?? null;
-        job.apiRoutes = findNum('API routes :') ?? findNum('API routes  :') ?? 0;
-        job.assets = findNum('Total unique assets saved') ?? findNum('Assets      :') ?? findNum('Assets       :') ?? 0;
-        if (job.pages === null) {
+        job.pages = findNum('Pages      :') ?? findNum('Pages       :') ?? findNum('Pages:') ?? null;
+        job.apiRoutes = findNum('API routes :') ?? findNum('API routes  :') ?? findNum('API routes:') ?? 0;
+        job.assets = findNum('Total unique assets saved') ?? findNum('Assets      :') ?? findNum('Assets       :') ?? findNum('Assets:') ?? 0;
+        if (job.pages === null || job.pages === 0) {
           try {
-            const pagesDir = join(outDir, 'captured-pages');
-            job.pages = existsSync(pagesDir)
-              ? readdirSync(pagesDir).filter(f => f.endsWith('.html') && f !== '__login__.html' && f !== '__register__.html').length
-              : 0;
-          } catch { job.pages = 0; }
+            const counted = await countClonePagesBestEffort(outDir);
+            if (counted > 0) job.pages = counted;
+            else if (job.pages === null) {
+              const pagesDir = join(outDir, 'captured-pages');
+              job.pages = existsSync(pagesDir)
+                ? readdirSync(pagesDir).filter(f => f.endsWith('.html') && f !== '__login__.html' && f !== '__register__.html').length
+                : 0;
+            }
+          } catch { if (job.pages === null) job.pages = 0; }
         }
         const completedAt = new Date().toISOString();
         let cloneReadable = code !== 0 ? { ok: false, error: 'Clone process failed' } : null;
@@ -3632,8 +3687,16 @@ async function handleRequest(req, res) {
               await persistCloneOutput(job.outDir);
               cloneReadable = await verifyCloneReadableWithRetry(job.outDir, 3);
             }
-            if ((job.pages ?? 0) <= 0) {
-              cloneReadable = { ok: false, error: 'Clone captured 0 pages' };
+            if (cloneReadable?.ok && cloneReadable.pages > 0) {
+              job.pages = cloneReadable.pages;
+            } else if ((job.pages ?? 0) <= 0) {
+              const recovered = await countClonePagesBestEffort(job.outDir);
+              if (recovered > 0) {
+                job.pages = recovered;
+                cloneReadable = { ok: true, pages: recovered };
+              } else {
+                cloneReadable = { ok: false, error: 'Clone captured 0 pages' };
+              }
             }
             if (!cloneReadable.ok) {
               job.logs.push(`[ERROR] Clone output is not ready for preview: ${cloneReadable.error}`);
