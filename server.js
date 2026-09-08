@@ -2922,6 +2922,17 @@ function isAllowedOrigin(origin) {
 
 function contentSecurityPolicyForPath(pathname) {
   const isPreviewSurface = pathname === '/api/page' || pathname === '/api/share-page' || pathname.startsWith('/share/') || pathname === '/api/asset' || pathname.startsWith('/_assets/');
+  const frameAncestors = (() => {
+    const allowed = new Set(["'self'"]);
+    for (const raw of [process.env.FRONTEND_URL, process.env.PUBLIC_APP_URL, process.env.CORS_ORIGINS]) {
+      for (const part of String(raw || '').split(',')) {
+        for (const o of originsFromEnvValue(part.trim())) allowed.add(o);
+      }
+    }
+    allowed.add('http://localhost:8080');
+    allowed.add('http://127.0.0.1:8080');
+    return [...allowed].join(' ');
+  })();
   if (isPreviewSurface) {
     return [
       "default-src 'self'",
@@ -2931,6 +2942,7 @@ function contentSecurityPolicyForPath(pathname) {
       "img-src 'self' data: blob: https:",
       "connect-src 'self' https: wss:",
       "frame-src 'self' https: blob: data: about:",
+      `frame-ancestors ${frameAncestors}`,
       "worker-src 'self' blob:",
       "object-src 'none'",
       "base-uri 'self'",
@@ -2947,6 +2959,7 @@ function contentSecurityPolicyForPath(pathname) {
     "img-src 'self' data: blob: https:",
     "connect-src 'self' https: wss:",
     "frame-src 'self'",
+    "frame-ancestors 'none'",
     "worker-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'self'",
@@ -2995,7 +3008,16 @@ async function handleRequest(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Auth-Token, X-CLONYFY-Token, X-Admin-Token');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  const isEmbeddablePreview =
+    url.pathname === '/api/page' ||
+    url.pathname === '/api/share-page' ||
+    url.pathname === '/api/asset' ||
+    url.pathname.startsWith('/share/') ||
+    url.pathname.startsWith('/_assets/');
+  // Cross-origin Frontend (Vercel) embeds /api/page in an iframe — SAMEORIGIN would blank it.
+  if (!isEmbeddablePreview) {
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  }
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
@@ -3386,8 +3408,39 @@ async function handleRequest(req, res) {
       res.writeHead(404); res.end('Not found'); return;
     }
     const route = url.searchParams.get('route') || '/';
-    const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
-    if (!map) { res.writeHead(404); res.end('No clone loaded'); return; }
+    let map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
+    if (!map) {
+      // Hosted: local disk may be gone after restart — rematerialize from Storage once.
+      try {
+        const materialized = await materializeCloneOutput(outDir);
+        map = loadRouteMap(materialized.dir) || await inferRouteMapFromCapturedPages(materialized.dir);
+        if (materialized.dir !== outDir) {
+          // Copy critical pages back into the canonical outDir when possible.
+          try {
+            if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+            const pagesSrc = join(materialized.dir, 'captured-pages');
+            const pagesDst = join(outDir, 'captured-pages');
+            if (existsSync(pagesSrc)) {
+              mkdirSync(pagesDst, { recursive: true });
+              for (const name of readdirSync(pagesSrc)) {
+                copyFileSync(join(pagesSrc, name), join(pagesDst, name));
+              }
+            }
+            const rmSrc = join(materialized.dir, 'route-map.json');
+            if (existsSync(rmSrc)) copyFileSync(rmSrc, join(outDir, 'route-map.json'));
+            map = loadRouteMap(outDir) || map;
+          } catch {}
+          try { materialized.cleanup(); } catch {}
+        }
+      } catch (err) {
+        console.warn('[api/page] rematerialize failed:', err?.message || err);
+      }
+    }
+    if (!map) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('No clone loaded — output files are missing from disk and storage. Re-run the clone.');
+      return;
+    }
     const resolved = resolveSharedRoute(map, route, '/');
     if (!resolved.filename) {
       res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -3687,6 +3740,15 @@ async function handleRequest(req, res) {
               await persistCloneOutput(job.outDir);
               cloneReadable = await verifyCloneReadableWithRetry(job.outDir, 3);
             }
+            // On Render/hosted, confirm Storage has route-map so preview survives disk wipe.
+            if (IS_HOSTED && cloneReadable?.ok) {
+              const storedMap = await loadRouteMapAsync(job.outDir);
+              if (!storedMap) {
+                job.logs.push('[WARN] route-map not readable after persist — retrying storage upload');
+                await persistCloneOutput(job.outDir);
+                cloneReadable = await verifyCloneReadableWithRetry(job.outDir, 3);
+              }
+            }
             if (cloneReadable?.ok && cloneReadable.pages > 0) {
               job.pages = cloneReadable.pages;
             } else if ((job.pages ?? 0) <= 0) {
@@ -3875,11 +3937,27 @@ async function handleRequest(req, res) {
     if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(previewUser, outDir)) return json(res, { error: 'Not found' }, 404);
     if (IS_HOSTED) {
-      const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
-      if (!map) return json(res, { error: 'Preview pages not found' }, 404);
+      let map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
+      if (!map) {
+        try {
+          const materialized = await materializeCloneOutput(outDir);
+          map = loadRouteMap(materialized.dir) || await inferRouteMapFromCapturedPages(materialized.dir);
+          try { materialized.cleanup(); } catch {}
+        } catch (err) {
+          console.warn('[api/preview] rematerialize failed:', err?.message || err);
+        }
+      }
+      if (!map) {
+        return json(res, {
+          error: 'Preview pages not found. Files may not have been saved to storage — re-run the clone after redeploying the Backend.',
+        }, 404);
+      }
+      const token = previewUser._sessionToken || '';
+      const qs = new URLSearchParams({ outDir, route: '/' });
+      if (token) qs.set('access_token', token);
       return json(res, {
         ok: true,
-        url: `/api/page?outDir=${encodeURIComponent(outDir)}&route=${encodeURIComponent('/')}`,
+        url: `${apiPublicUrl(req)}/api/page?${qs.toString()}`,
         hosted: true,
       });
     }
@@ -4305,7 +4383,8 @@ async function handleRequest(req, res) {
       return json(res, { error: 'Could not save the share link. Please try again in a moment.' }, 500);
     }
     const recorded = await consumeUsageQuota(shareUser, 'share', { outDir });
-    const _appUrl = publicAppUrl(req);
+    // Share pages are served by this Backend — never the Frontend origin.
+    const _appUrl = apiPublicUrl(req);
     return json(res, { shareId, url: `${_appUrl}/share/${shareId}`, usage: { kind: 'share', used: recorded.used, limit: recorded.limit } });
   }
 
