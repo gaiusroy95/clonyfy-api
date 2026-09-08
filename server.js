@@ -2854,21 +2854,46 @@ function githubErrorStatus(err) {
 
 // Allowed origins for CORS. The app's own origin is always allowed.
 // Stripe webhook calls have no Origin header and bypass this check.
+function originsFromEnvValue(raw) {
+  const out = new Set();
+  const value = String(raw || '').trim();
+  if (!value) return out;
+  try {
+    const url = new URL(value.includes('://') ? value : `https://${value}`);
+    out.add(url.origin);
+    const host = url.hostname;
+    if (host.startsWith('www.')) {
+      out.add(`${url.protocol}//${host.slice(4)}`);
+    } else if (host.includes('.') && host !== 'localhost' && !/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      out.add(`${url.protocol}//www.${host}`);
+    }
+  } catch {
+    /* ignore invalid */
+  }
+  return out;
+}
+
 function isAllowedOrigin(origin) {
   if (!origin) return true; // same-origin / server-to-server requests have no Origin
-  const appUrl = String(getCachedSettings()?.app_url || DEFAULT_APP_URL);
+  const allowed = new Set();
   try {
-    const appOrigin = new URL(appUrl).origin;
-    if (origin === appOrigin) return true;
+    const appUrl = String(getCachedSettings()?.app_url || DEFAULT_APP_URL);
+    for (const o of originsFromEnvValue(appUrl)) allowed.add(o);
   } catch {}
-  const frontend = String(process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').replace(/\/$/, '');
-  if (frontend) {
-    try {
-      if (origin === new URL(frontend).origin) return true;
-    } catch {}
+  for (const raw of [
+    process.env.FRONTEND_URL,
+    process.env.PUBLIC_APP_URL,
+    process.env.CORS_ORIGINS,
+  ]) {
+    for (const part of String(raw || '').split(',')) {
+      for (const o of originsFromEnvValue(part.trim())) allowed.add(o);
+    }
   }
+  if (allowed.has(origin)) return true;
   // Allow localhost in development
   if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  // Vercel preview / production aliases
+  if (/^https:\/\/[a-z0-9-]+-?[a-z0-9]*\.vercel\.app$/i.test(origin)) return true;
   return false;
 }
 
@@ -5682,8 +5707,12 @@ async function handler(req, res) {
 }
 
 ensureInit().then(() => {
-  createServer(handler).listen(PORT, () => {
-    console.log(`\n🌐 CLONYFY API running at: http://localhost:${PORT}\n`);
+  // Bind all interfaces so Render/proxy health checks can reach the process.
+  createServer(handler).listen(PORT, '0.0.0.0', () => {
+    const publicUrl = DEFAULT_APP_URL || `http://localhost:${PORT}`;
+    console.log(`\nCLONYFY API listening on 0.0.0.0:${PORT}`);
+    console.log(`Public URL: ${publicUrl}`);
+    console.log(`Frontend CORS: ${process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '(not set)'}\n`);
   });
 });
 
