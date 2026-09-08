@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ember & Oak — Modern American Kitchen</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#1a1008;color:#f5e6c8}
+a{text-decoration:none;color:inherit}
+
+/* Nav */
+nav{position:absolute;top:0;left:0;right:0;z-index:10;display:flex;align-items:center;justify-content:space-between;padding:24px 60px}
+.nav-logo{text-align:center}
+.nav-logo-name{font-size:28px;font-weight:900;color:#fff;letter-spacing:.05em;font-variant:small-caps}
+.nav-logo-tag{font-size:10px;letter-spacing:.25em;color:#d97706;text-transform:uppercase;margin-top:2px}
+.nav-links{display:flex;gap:28px}
+.nav-links a{font-size:13px;letter-spacing:.08em;color:#d4c4a8;text-transform:uppercase;font-weight:600;transition:color .2s}
+.nav-links a:hover{color:#d97706}
+.res-btn{padding:10px 22px;border:1px solid #d97706;color:#d97706;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;background:transparent;transition:all .2s}
+.res-btn:hover{background:#d97706;color:#111}
+
+/* Hero */
+.hero{height:90vh;min-height:600px;background:linear-gradient(135deg,#1a0a00 0%,#2d1700 50%,#1a0a00 100%);display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;position:relative;overflow:hidden}
+.hero-bg{position:absolute;inset:0;background:radial-gradient(ellipse 70% 80% at 50% 40%,rgba(217,119,6,.12) 0%,transparent 70%);pointer-events:none}
+.hero-pattern{position:absolute;inset:0;opacity:.04;background-image:repeating-linear-gradient(45deg,#d97706 0,#d97706 1px,transparent 0,transparent 50%);background-size:20px 20px}
+.hero-eyebrow{font-size:11px;letter-spacing:.3em;color:#d97706;text-transform:uppercase;font-weight:700;margin-bottom:24px}
+.hero h1{font-size:72px;font-weight:900;color:#fff;letter-spacing:-2px;line-height:1.0;margin-bottom:20px;position:relative}
+.hero h1 em{font-style:italic;color:#d97706}
+.hero-line{width:60px;height:2px;background:#d97706;margin:24px auto;opacity:.6}
+.hero-sub{font-size:17px;color:#a89070;max-width:480px;line-height:1.8;margin-bottom:44px}
+.hero-ctas{display:flex;gap:16px;justify-content:center}
+.btn-gold{padding:16px 36px;background:#d97706;color:#111;border:none;border-radius:4px;font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:all .2s}
+.btn-gold:hover{background:#b45309;transform:translateY(-1px)}
+.btn-wht-outline{padding:15px 36px;background:transparent;border:1px solid rgba(255,255,255,.25);color:#d4c4a8;border-radius:4px;font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;cursor:pointer}
+.hero-scroll{position:absolute;bottom:32px;font-size:11px;letter-spacing:.2em;color:#6b5040;text-transform:uppercase}
+
+/* About strip */
+.about-strip{background:#120c03;border-top:1px solid rgba(217,119,6,.15);border-bottom:1px solid rgba(217,119,6,.15);padding:40px 60px;display:flex;justify-content:center;gap:80px}
+.strip-item{text-align:center}
+.strip-num{font-size:32px;font-weight:900;color:#d97706;margin-bottom:4px}
+.strip-label{font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:#8b7355;font-weight:600}
+
+/* Menu section */
+.menu-section{padding:90px 60px;max-width:1100px;margin:0 auto}
+.sec-tag{font-size:10px;letter-spacing:.25em;text-transform:uppercase;color:#d97706;font-weight:700;text-align:center;margin-bottom:10px}
+.sec-title{font-size:42px;font-weight:900;text-align:center;color:#f5e6c8;letter-spacing:-.5px;margin-bottom:8px}
+.sec-divider{display:flex;align-items:center;gap:16px;justify-content:center;margin-bottom:52px}
+.sec-divider-line{flex:1;max-width:80px;height:1px;background:rgba(217,119,6,.3)}
+.sec-divider-icon{color:#d97706;font-size:16px}
+.menu-tabs{display:flex;justify-content:center;gap:0;margin-bottom:44px;border:1px solid rgba(217,119,6,.2);border-radius:4px;overflow:hidden;width:fit-content;margin-left:auto;margin-right:auto}
+.menu-tab{padding:10px 28px;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8b7355;cursor:pointer;background:transparent;border:none;border-right:1px solid rgba(217,119,6,.2);transition:all .2s}
+.menu-tab:last-child{border-right:none}
+.menu-tab.on{background:#d97706;color:#111}
+.menu-grid{display:grid;grid-template-columns:1fr 1fr;gap:2px}
+.menu-item{background:#1f1208;padding:28px;display:flex;gap:20px;align-items:start;border:1px solid rgba(255,255,255,.04);transition:border-color .2s}
+.menu-item:hover{border-color:rgba(217,119,6,.3)}
+.menu-info{flex:1}
+.menu-name{font-size:17px;font-weight:800;color:#f5e6c8;margin-bottom:4px;letter-spacing:-.2px}
+.menu-desc{font-size:13px;color:#7d6448;line-height:1.65;margin-bottom:8px}
+.menu-tags{display:flex;gap:6px}
+.menu-tag{padding:2px 8px;border:1px solid rgba(217,119,6,.25);border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.06em;color:#b87030;text-transform:uppercase}
+.menu-price{font-size:18px;font-weight:900;color:#d97706;white-space:nowrap;margin-top:2px}
+
+/* Chef section */
+.chef-section{background:#120c03;padding:90px 60px;display:grid;grid-template-columns:1fr 1fr;gap:80px;align-items:center;max-width:1200px;margin:0 auto}
+.chef-img{height:460px;border-radius:8px;background:linear-gradient(135deg,#2d1700,#3d2200);display:flex;align-items:center;justify-content:center;font-size:100px;border:1px solid rgba(217,119,6,.15)}
+.chef-tag{font-size:10px;letter-spacing:.25em;text-transform:uppercase;color:#d97706;font-weight:700;margin-bottom:14px}
+.chef-section h2{font-size:38px;font-weight:900;color:#f5e6c8;line-height:1.1;letter-spacing:-.5px;margin-bottom:20px}
+.chef-section p{font-size:15px;color:#7d6448;line-height:1.8;margin-bottom:20px}
+.chef-sig{font-size:28px;font-style:italic;color:#d97706;font-weight:700;margin-top:24px}
+
+/* Reservation */
+.reservation{padding:90px 60px;text-align:center;background:#1a1008}
+.res-form{max-width:600px;margin:40px auto 0;text-align:left}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.form-group{display:flex;flex-direction:column;gap:7px}
+.form-group label{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8b7355}
+.form-group input,.form-group select{background:#1f1208;border:1px solid rgba(217,119,6,.2);border-radius:4px;padding:13px 16px;font-size:14px;font-family:inherit;color:#f5e6c8;outline:none;transition:border-color .2s}
+.form-group input:focus,.form-group select:focus{border-color:#d97706}
+.form-group select option{background:#1a1008}
+.res-submit{width:100%;padding:16px;background:#d97706;color:#111;border:none;border-radius:4px;font-size:14px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;margin-top:8px}
+.res-submit:hover{background:#b45309}
+
+/* Hours & Location */
+.info-section{display:grid;grid-template-columns:1fr 1fr;background:#120c03;border-top:1px solid rgba(217,119,6,.15)}
+.info-col{padding:60px}
+.info-title{font-size:11px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:#d97706;margin-bottom:20px}
+.hours-row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:14px}
+.hours-day{color:#8b7355;font-weight:600}
+.hours-time{color:#d4c4a8}
+.address{font-size:15px;color:#8b7355;line-height:1.9}
+.address strong{display:block;color:#f5e6c8;font-size:18px;margin-bottom:10px;font-weight:800}
+
+/* Footer */
+footer{background:#0d0800;border-top:1px solid rgba(217,119,6,.1);padding:40px 60px;display:flex;justify-content:space-between;align-items:center}
+.footer-logo{font-size:18px;font-weight:900;color:#d97706;letter-spacing:.05em;font-variant:small-caps}
+footer p{font-size:12px;color:#4a3520;letter-spacing:.05em}
+.footer-links{display:flex;gap:20px}
+.footer-links a{font-size:12px;color:#4a3520;letter-spacing:.06em;text-transform:uppercase}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-links">
+    <a href="#">Menu</a>
+    <a href="#">Story</a>
+    <a href="#">Events</a>
+  </div>
+  <div class="nav-logo">
+    <div class="nav-logo-name">Ember & Oak</div>
+    <div class="nav-logo-tag">Modern American Kitchen</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:20px">
+    <div class="nav-links">
+      <a href="#">Gallery</a>
+      <a href="#">Contact</a>
+    </div>
+    <button class="res-btn">Reserve a Table</button>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-pattern"></div>
+  <div class="hero-eyebrow">Est. 2018 · Downtown</div>
+  <h1>Where fire meets<br><em>flavor</em></h1>
+  <div class="hero-line"></div>
+  <p class="hero-sub">Wood-fired cooking, seasonal ingredients, and the warmth of genuine hospitality. An experience worth savoring.</p>
+  <div class="hero-ctas">
+    <button class="btn-gold">Reserve a Table</button>
+    <button class="btn-wht-outline">View Our Menu</button>
+  </div>
+  <div class="hero-scroll">↓ Scroll to explore</div>
+</section>
+
+<div class="about-strip">
+  <div class="strip-item"><div class="strip-num">7</div><div class="strip-label">Years of Excellence</div></div>
+  <div class="strip-item"><div class="strip-num">4.9★</div><div class="strip-label">Guest Rating</div></div>
+  <div class="strip-item"><div class="strip-num">2</div><div class="strip-label">Michelin Stars</div></div>
+  <div class="strip-item"><div class="strip-num">100%</div><div class="strip-label">Local Sourced</div></div>
+</div>
+
+<section class="menu-section">
+  <div class="sec-tag">Our Menu</div>
+  <h2 class="sec-title">Crafted with passion</h2>
+  <div class="sec-divider">
+    <div class="sec-divider-line"></div>
+    <div class="sec-divider-icon">✦</div>
+    <div class="sec-divider-line"></div>
+  </div>
+  <div class="menu-tabs">
+    <button class="menu-tab on">Starters</button>
+    <button class="menu-tab">Mains</button>
+    <button class="menu-tab">Sides</button>
+    <button class="menu-tab">Desserts</button>
+    <button class="menu-tab">Drinks</button>
+  </div>
+  <div class="menu-grid">
+    <div class="menu-item">
+      <div class="menu-info">
+        <div class="menu-name">Oak-Smoked Burrata</div>
+        <p class="menu-desc">Fresh burrata with heirloom tomatoes, oak-smoked oil, micro basil, and aged balsamic reduction.</p>
+        <div class="menu-tags"><span class="menu-tag">Vegetarian</span><span class="menu-tag">House Favorite</span></div>
+      </div>
+      <div class="menu-price">$18</div>
+    </div>
+    <div class="menu-item">
+      <div class="menu-info">
+        <div class="menu-name">Fire-Roasted Oysters</div>
+        <p class="menu-desc">Half dozen Pacific oysters, flame-kissed with compound butter, shallot mignonette, and lemon.</p>
+        <div class="menu-tags"><span class="menu-tag">Seafood</span></div>
+      </div>
+      <div class="menu-price">$24</div>
+    </div>
+    <div class="menu-item">
+      <div class="menu-info">
+        <div class="menu-name">Heritage Charcuterie</div>
+        <p class="menu-desc">Rotating selection of cured meats, artisan cheeses, seasonal preserves, and house-baked sourdough.</p>
+        <div class="menu-tags"><span class="menu-tag">Chef's Selection</span></div>
+      </div>
+      <div class="menu-price">$28</div>
+    </div>
+    <div class="menu-item">
+      <div class="menu-info">
+        <div class="menu-name">Ember-Roasted Beets</div>
+        <p class="menu-desc">Golden and candy-stripe beets, whipped goat cheese, candied walnut, pomegranate molasses.</p>
+        <div class="menu-tags"><span class="menu-tag">Vegan</span><span class="menu-tag">GF</span></div>
+      </div>
+      <div class="menu-price">$16</div>
+    </div>
+  </div>
+</section>
+
+<div style="max-width:1100px;margin:0 auto;padding:0 60px 90px">
+  <div style="text-align:center;margin-top:32px"><button class="btn-gold" style="font-size:12px;padding:12px 32px">View Full Menu →</button></div>
+</div>
+
+<section style="background:#120c03;padding:90px 60px;max-width:1200px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:80px;align-items:center">
+  <div style="height:460px;border-radius:8px;background:linear-gradient(135deg,#2d1700,#3d2200);display:flex;align-items:center;justify-content:center;font-size:100px;border:1px solid rgba(217,119,6,.15)">👨‍🍳</div>
+  <div>
+    <div style="font-size:10px;letter-spacing:.25em;text-transform:uppercase;color:#d97706;font-weight:700;margin-bottom:14px">Meet the Chef</div>
+    <h2 style="font-size:38px;font-weight:900;color:#f5e6c8;line-height:1.1;letter-spacing:-.5px;margin-bottom:20px">Marcus Rivera</h2>
+    <p style="font-size:15px;color:#7d6448;line-height:1.8;margin-bottom:16px">Trained in Lyon and Barcelona, Chef Marcus brings two decades of culinary mastery to every plate. His philosophy is simple: let exceptional ingredients speak for themselves.</p>
+    <p style="font-size:15px;color:#7d6448;line-height:1.8;margin-bottom:24px">The wood-fired hearth at the heart of our kitchen isn't just technique — it's a connection to something ancient, primal, and deeply satisfying.</p>
+    <div style="font-size:28px;font-style:italic;color:#d97706;font-weight:700">— Chef Marcus</div>
+  </div>
+</section>
+
+<section class="reservation">
+  <div class="sec-tag">Reservations</div>
+  <h2 class="sec-title">Join us for dinner</h2>
+  <div class="sec-divider"><div class="sec-divider-line"></div><div class="sec-divider-icon">✦</div><div class="sec-divider-line"></div></div>
+  <p style="font-size:15px;color:#7d6448;max-width:420px;margin:0 auto;line-height:1.7">We recommend booking at least 48 hours in advance. Walk-ins welcome based on availability.</p>
+  <form class="res-form">
+    <div class="form-row">
+      <div class="form-group"><label>First Name</label><input type="text" placeholder="Marcus"></div>
+      <div class="form-group"><label>Last Name</label><input type="text" placeholder="Rivera"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Date</label><input type="date"></div>
+      <div class="form-group"><label>Time</label>
+        <select>
+          <option>6:00 PM</option><option>6:30 PM</option><option>7:00 PM</option>
+          <option>7:30 PM</option><option>8:00 PM</option><option>8:30 PM</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Guests</label>
+        <select><option>1 Guest</option><option>2 Guests</option><option>3 Guests</option><option>4 Guests</option><option>5+ Guests</option></select>
+      </div>
+      <div class="form-group"><label>Phone</label><input type="tel" placeholder="+1 (555) 000-0000"></div>
+    </div>
+    <button type="submit" class="res-submit">Request Reservation</button>
+  </form>
+</section>
+
+<div class="info-section">
+  <div class="info-col">
+    <div class="info-title">Hours</div>
+    <div class="hours-row"><span class="hours-day">Tuesday – Thursday</span><span class="hours-time">5:30 – 10:00 PM</span></div>
+    <div class="hours-row"><span class="hours-day">Friday – Saturday</span><span class="hours-time">5:00 – 11:00 PM</span></div>
+    <div class="hours-row"><span class="hours-day">Sunday</span><span class="hours-time">5:00 – 9:30 PM</span></div>
+    <div class="hours-row"><span class="hours-day">Monday</span><span class="hours-time">Closed</span></div>
+  </div>
+  <div class="info-col" style="border-left:1px solid rgba(217,119,6,.1)">
+    <div class="info-title">Find Us</div>
+    <div class="address">
+      <strong>Ember & Oak</strong>
+      248 Hearth Street<br>
+      Downtown District<br>
+      New York, NY 10001<br><br>
+      reservations@emberandoak.com<br>
+      +1 (212) 555-0182
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-logo">Ember & Oak</div>
+  <div class="footer-links">
+    <a href="#">Menu</a>
+    <a href="#">Events</a>
+    <a href="#">Gift Cards</a>
+    <a href="#">Privacy</a>
+  </div>
+  <p>&copy; 2025 Ember & Oak Restaurant</p>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,30 @@
+{
+  "name": "clonyfy-backend",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "build": "npm install --prefix packages/cloner && npm run build --prefix packages/cloner",
+    "dev": "node server.js",
+    "start": "node server.js",
+    "test": "npm test --prefix packages/cloner",
+    "test:figma-scene": "node --test lib/__tests__/figmaSceneGraph.test.mjs figma-plugin/__tests__/helpers.test.mjs",
+    "db:migrate": "node scripts/db-migrate.mjs",
+    "db:status": "node scripts/db-migrate.mjs --status",
+    "db:schema": "node scripts/db-migrate.mjs --schema",
+    "db:push": "npx supabase db push",
+    "smoke:week3": "node scripts/week3-smoke.mjs",
+    "smoke:week4": "node scripts/week4-smoke.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.105.4",
+    "archiver": "^7.0.1",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.2",
+    "nodemailer": "^8.0.7",
+    "pg": "^8.16.3",
+    "stripe": "^22.1.1"
+  }
+}

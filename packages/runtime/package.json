@@ -1,0 +1,13 @@
+{
+  "name": "@clonyfy/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/replay.js",
+  "exports": {
+    ".": "./src/replay.js"
+  },
+  "scripts": {
+    "build": "echo 'runtime: no build needed'"
+  }
+}

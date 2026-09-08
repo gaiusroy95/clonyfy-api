@@ -1,0 +1,14 @@
+node_modules/
+dist/
+!packages/cloner/dist/
+output/
+*.db
+.env
+data/
+CLAUDE.zip
+dist-electron/
+.claude/
+browsers/
+.admin-sessions.json
+.next/
+out/

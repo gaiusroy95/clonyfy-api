@@ -1,0 +1,38 @@
+import { dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  outputFileTracingRoot: __dirname,
+  trailingSlash: false,
+  images: {
+    unoptimized: true,
+  },
+  async headers() {
+    return [
+      {
+        // Long-lived immutable cache for content-hashed static assets
+        source: '/_assets/:file*',
+        headers: [
+          { key: 'Cache-Control', value: 'public, max-age=31536000, immutable' },
+          { key: 'Access-Control-Allow-Origin', value: '*' },
+        ],
+      },
+      {
+        // Captured HTML pages — no cache so edits in the visual editor take effect immediately
+        source: '/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'no-store' },
+          // Remove any CSP the Next.js runtime might add — the cloned HTML is self-contained
+          { key: 'Content-Security-Policy', value: "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; img-src * data: blob:; font-src * data:; connect-src *;" },
+          // Allow iframes (some cloned sites embed themselves)
+          { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+        ],
+      },
+    ];
+  },
+};
+
+export default nextConfig;

@@ -1,0 +1,468 @@
+/**
+ * Clonyfy Scene Graph → SVG (no screenshots).
+ * Reconstructs the page as native Figma-importable vector layers using
+ * computed styles, paint order, Range text metrics, gradients, and images.
+ */
+export default async function figmaExportPage(options = {}) {
+  const viewportWidth = Number(options.viewportWidth) || 1440;
+  const maxLayers = Math.min(Math.max(Number(options.maxLayers) || 4500, 500), 8000);
+
+  function svgEsc(v) {
+    return String(v ?? '').replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;',
+    }[ch]));
+  }
+
+  function num(v) {
+    return Number.isFinite(v) ? Math.round(v * 100) / 100 : 0;
+  }
+
+  function parseAlpha(color) {
+    if (!color || color === 'transparent') return 0;
+    const m = String(color).match(/rgba?\([^)]+\)/);
+    if (!m) return 1;
+    const parts = m[0].replace(/rgba?\(|\)/g, '').split(',').map((s) => s.trim());
+    if (parts.length === 4) return parseFloat(parts[3]) || 0;
+    return 1;
+  }
+
+  function isVisible(cs) {
+    if (!cs) return false;
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    if (parseFloat(cs.opacity || '1') <= 0.02) return false;
+    return true;
+  }
+
+  function skipRoot(el) {
+    if (!el || el.nodeType !== 1) return true;
+    if (el.closest('script,style,noscript,template,iframe,#__ce__,[data-clonyfy-scroll-reveal],[data-clonyfy-preview-nav],[data-clonyfy-share-nav]')) return true;
+    if (el.id === 'clonyfy-scroll-reveal-style' || el.id === '__clonyfy_figma_hide__') return true;
+    return false;
+  }
+
+  function layerId(el, suffix = '') {
+    const base = el.getAttribute('data-framer-name')
+      || el.getAttribute('aria-label')
+      || el.id
+      || el.tagName.toLowerCase();
+    const clean = String(base).replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'layer';
+    return `${clean}${suffix}`;
+  }
+
+  function absRect(el) {
+    const r = el.getBoundingClientRect();
+    return {
+      x: num(r.left + window.scrollX),
+      y: num(r.top + window.scrollY),
+      w: num(r.width),
+      h: num(r.height),
+    };
+  }
+
+  function radii(cs) {
+    const tl = parseFloat(cs.borderTopLeftRadius) || 0;
+    const tr = parseFloat(cs.borderTopRightRadius) || 0;
+    const br = parseFloat(cs.borderBottomRightRadius) || 0;
+    const bl = parseFloat(cs.borderBottomLeftRadius) || 0;
+    if (tl === tr && tr === br && br === bl) return { rx: tl, uniform: true };
+    return { tl, tr, br, bl, uniform: false };
+  }
+
+  function bgImageUrl(bg) {
+    const s = String(bg || '');
+    if (!s || s === 'none') return '';
+    const m = s.match(/url\(["']?([^"')]+)["']?\)/);
+    return m ? m[1] : '';
+  }
+
+  function hasGradient(bg) {
+    return /gradient\(/i.test(String(bg || ''));
+  }
+
+  async function inlineImage(src, maxBytes = 3_500_000) {
+    if (!src || src.startsWith('data:')) return src || '';
+    try {
+      const abs = new URL(src, document.baseURI || location.href).href;
+      const res = await fetch(abs, { credentials: 'omit' });
+      if (!res.ok) return abs;
+      const blob = await res.blob();
+      if (blob.size > maxBytes) return abs;
+      return await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || abs));
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return src;
+    }
+  }
+
+  function applyTextTransform(text, transform) {
+    const t = String(transform || '').toLowerCase();
+    if (t === 'uppercase') return text.toUpperCase();
+    if (t === 'lowercase') return text.toLowerCase();
+    if (t === 'capitalize') return text.replace(/\b\w/g, (c) => c.toUpperCase());
+    return text;
+  }
+
+  function splitTextLines(text, rects, cs) {
+    if (!rects.length) return [];
+    if (rects.length === 1) return [{ text, rect: rects[0] }];
+    try {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return [{ text, rect: rects[0] }];
+      ctx.font = `${cs.fontStyle || 'normal'} ${cs.fontWeight || '400'} ${cs.fontSize || '16px'} ${cs.fontFamily || 'sans-serif'}`;
+      const words = String(text).split(/\s+/).filter(Boolean);
+      const lines = [];
+      let wi = 0;
+      for (let li = 0; li < rects.length; li++) {
+        const maxW = Math.max(4, rects[li].width + 1);
+        const chunk = [];
+        while (wi < words.length) {
+          const trial = chunk.length ? `${chunk.join(' ')} ${words[wi]}` : words[wi];
+          if (chunk.length && ctx.measureText(trial).width > maxW) break;
+          chunk.push(words[wi++]);
+        }
+        if (li === rects.length - 1 && wi < words.length) chunk.push(...words.slice(wi));
+        if (chunk.length) lines.push({ text: chunk.join(' '), rect: rects[li] });
+      }
+      return lines.length ? lines : [{ text, rect: rects[0] }];
+    } catch {
+      return [{ text, rect: rects[0] }];
+    }
+  }
+
+  // --- Gradient defs (linear only; radial falls back to average color) ---
+  const defs = [];
+  const gradCache = new Map();
+  let gradSeq = 0;
+
+  function parseLinearGradient(css, id) {
+    const m = String(css).match(/linear-gradient\((.+)\)/i);
+    if (!m) return null;
+    const inner = m[1];
+    const parts = inner.split(/,(?![^(]*\))/).map((s) => s.trim());
+    let angle = 180;
+    let stops = parts;
+    if (/deg|to /.test(parts[0])) {
+      const head = parts[0];
+      stops = parts.slice(1);
+      const deg = head.match(/(-?\d+(?:\.\d+)?)deg/);
+      if (deg) angle = parseFloat(deg[1]);
+      else if (/to top/i.test(head)) angle = 0;
+      else if (/to right/i.test(head)) angle = 90;
+      else if (/to bottom/i.test(head)) angle = 180;
+      else if (/to left/i.test(head)) angle = 270;
+    }
+    const rad = (angle - 90) * (Math.PI / 180);
+    const x1 = 50 - Math.cos(rad) * 50;
+    const y1 = 50 - Math.sin(rad) * 50;
+    const x2 = 50 + Math.cos(rad) * 50;
+    const y2 = 50 + Math.sin(rad) * 50;
+    const stopSvg = stops.map((stop) => {
+      const sm = stop.match(/^(.+?)\s+(\d+(?:\.\d+)?%)/);
+      if (sm) return `<stop offset="${sm[2]}" stop-color="${svgEsc(sm[1].trim())}"/>`;
+      return `<stop offset="0%" stop-color="${svgEsc(stop)}"/>`;
+    }).join('');
+    return `<linearGradient id="${id}" x1="${num(x1)}%" y1="${num(y1)}%" x2="${num(x2)}%" y2="${num(y2)}%">${stopSvg}</linearGradient>`;
+  }
+
+  function gradientRef(css) {
+    const key = String(css);
+    if (gradCache.has(key)) return gradCache.get(key);
+    const id = `g${++gradSeq}`;
+    const linear = parseLinearGradient(css, id);
+    if (linear) {
+      defs.push(linear);
+      gradCache.set(key, id);
+      return id;
+    }
+    gradCache.set(key, null);
+    return null;
+  }
+
+  async function expandLazyContent() {
+    document.querySelectorAll('[style*="content-visibility"]').forEach((el) => {
+      try { el.style.setProperty('content-visibility', 'visible', 'important'); } catch {}
+    });
+    document.querySelectorAll('img[loading="lazy"]').forEach((img) => {
+      try { img.loading = 'eager'; } catch {}
+    });
+    document.querySelectorAll('[data-src],[data-lazy-src]').forEach((el) => {
+      const real = el.getAttribute('data-src') || el.getAttribute('data-lazy-src');
+      if (real && el.tagName === 'IMG' && !el.getAttribute('src')) el.setAttribute('src', real);
+    });
+    const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+    const step = Math.max(window.innerHeight, 700);
+    const maxY = Math.min(document.documentElement.scrollHeight, 32000);
+    for (let y = 0; y <= maxY; y += step) {
+      window.scrollTo(0, y);
+      await delay(45);
+    }
+    window.scrollTo(0, 0);
+    await delay(120);
+  }
+
+  await expandLazyContent();
+
+  const width = Math.ceil(Math.max(
+    document.documentElement.scrollWidth,
+    document.body?.scrollWidth || 0,
+    viewportWidth,
+    320,
+  ));
+  const height = Math.ceil(Math.max(
+    document.documentElement.scrollHeight,
+    document.body?.scrollHeight || 0,
+    320,
+  ));
+
+  const layers = [];
+  let paintOrder = 0;
+  const seenText = new Set();
+  const seenBgImage = new Set();
+
+  function pushLayer(group, id, svg, kind) {
+    if (!svg) return;
+    layers.push({ order: paintOrder++, group, id, svg, kind });
+  }
+
+  function rectAttrs(r, cs, id, fill, extra = '') {
+    const rad = radii(cs);
+    const op = parseFloat(cs.opacity || '1');
+    const opacity = op < 0.999 ? ` opacity="${num(op)}"` : '';
+    if (rad.uniform && rad.rx > 0) {
+      return `<rect id="${svgEsc(id)}" x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" rx="${num(rad.rx)}" fill="${fill}"${opacity}${extra}/>`;
+    }
+    if (!rad.uniform && (rad.tl || rad.tr || rad.br || rad.bl)) {
+      const d = `M ${r.x + rad.tl} ${r.y} H ${r.x + r.w - rad.tr} Q ${r.x + r.w} ${r.y} ${r.x + r.w} ${r.y + rad.tr} V ${r.y + r.h - rad.br} Q ${r.x + r.w} ${r.y + r.h} ${r.x + r.w - rad.br} ${r.y + r.h} H ${r.x + rad.bl} Q ${r.x} ${r.y + r.h} ${r.x} ${r.y + r.h - rad.bl} V ${r.y + rad.tl} Q ${r.x} ${r.y} ${r.x + rad.tl} ${r.y} Z`;
+      return `<path id="${svgEsc(id)}" d="${d}" fill="${fill}"${opacity}${extra}/>`;
+    }
+    return `<rect id="${svgEsc(id)}" x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${fill}"${opacity}${extra}/>`;
+  }
+
+  async function paintBackground(el, cs, r, group) {
+    if (r.w < 1 || r.h < 1) return;
+    const bgImg = cs.backgroundImage;
+    const bgColor = cs.backgroundColor;
+    const hasColor = parseAlpha(bgColor) > 0.04;
+    const url = bgImageUrl(bgImg);
+    const gradId = hasGradient(bgImg) ? gradientRef(bgImg) : null;
+
+    if (gradId) {
+      pushLayer(group, `${layerId(el)}-gradient`, rectAttrs(r, cs, `${layerId(el)}-gradient`, `url(#${gradId})`), 'fill');
+    } else if (hasColor) {
+      pushLayer(group, `${layerId(el)}-fill`, rectAttrs(r, cs, `${layerId(el)}-fill`, svgEsc(bgColor)), 'fill');
+    }
+
+    if (url && !url.startsWith('data:image/svg')) {
+      const key = `${url}@${Math.round(r.x)}@${Math.round(r.y)}@${Math.round(r.w)}x${Math.round(r.h)}`;
+      if (!seenBgImage.has(key)) {
+        seenBgImage.add(key);
+        const href = await inlineImage(url);
+        const op = parseFloat(cs.opacity || '1');
+        const opacity = op < 0.999 ? ` opacity="${num(op)}"` : '';
+        pushLayer(group, `${layerId(el)}-bgimg`, `<image id="${svgEsc(layerId(el))}-bgimg" x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" href="${svgEsc(href)}" xlink:href="${svgEsc(href)}" preserveAspectRatio="xMidYMid slice"${opacity}/>`, 'image');
+      }
+    }
+  }
+
+  function paintBorder(el, cs, r, group) {
+    const bw = Math.max(
+      parseFloat(cs.borderTopWidth) || 0,
+      parseFloat(cs.borderRightWidth) || 0,
+      parseFloat(cs.borderBottomWidth) || 0,
+      parseFloat(cs.borderLeftWidth) || 0,
+    );
+    if (bw <= 0 || cs.borderTopStyle === 'none') return;
+    const color = cs.borderTopColor || cs.borderColor;
+    if (parseAlpha(color) <= 0.04) return;
+    const rad = radii(cs);
+    const rx = rad.uniform ? rad.rx : 0;
+    const op = parseFloat(cs.opacity || '1');
+    const opacity = op < 0.999 ? ` opacity="${num(op)}"` : '';
+    pushLayer(group, `${layerId(el)}-border`, `<rect id="${svgEsc(layerId(el))}-border" x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" rx="${num(rx)}" fill="none" stroke="${svgEsc(color)}" stroke-width="${num(bw)}"${opacity}/>`, 'stroke');
+  }
+
+  async function paintPseudo(el, pseudo, group) {
+    const cs = getComputedStyle(el, pseudo);
+    if (!cs || cs.content === 'none' || cs.content === 'normal') return;
+    if (!isVisible(cs)) return;
+    const r = absRect(el);
+    if (r.w < 1 || r.h < 1) return;
+    const url = bgImageUrl(cs.backgroundImage);
+    if (url) {
+      const href = await inlineImage(url);
+      pushLayer(group, `${layerId(el)}-${pseudo}-img`, `<image x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" href="${svgEsc(href)}" xlink:href="${svgEsc(href)}" preserveAspectRatio="xMidYMid slice"/>`, 'pseudo');
+    }
+    if (parseAlpha(cs.backgroundColor) > 0.04) {
+      pushLayer(group, `${layerId(el)}-${pseudo}-fill`, rectAttrs(r, cs, `${layerId(el)}-${pseudo}`, svgEsc(cs.backgroundColor)), 'pseudo');
+    }
+  }
+
+  async function paintElement(el) {
+    if (skipRoot(el) || layers.length >= maxLayers) return;
+    const cs = getComputedStyle(el);
+    if (!isVisible(cs)) return;
+    const r = absRect(el);
+    if (r.w < 0.5 || r.h < 0.5) return;
+    if (r.y > height + 200 || r.x > width + 200) return;
+
+    const section = el.closest('section[id], section[aria-label], main, header, footer, nav, article');
+    const group = section && section !== el ? layerId(section) : 'Page';
+
+    await paintPseudo(el, '::before', group);
+
+    // Skip redundant wrapper fills (same-size single child) — reduces stacked clutter.
+    const onlyChild = el.children.length === 1 ? el.children[0] : null;
+    const childCs = onlyChild ? getComputedStyle(onlyChild) : null;
+    const childR = onlyChild ? absRect(onlyChild) : null;
+    const isRedundantWrapper = onlyChild
+      && childCs && isVisible(childCs)
+      && childR
+      && Math.abs(childR.x - r.x) < 2
+      && Math.abs(childR.y - r.y) < 2
+      && Math.abs(childR.w - r.w) < 2
+      && Math.abs(childR.h - r.h) < 2
+      && parseAlpha(cs.backgroundColor) <= 0.04
+      && !bgImageUrl(cs.backgroundImage)
+      && !hasGradient(cs.backgroundImage);
+
+    if (!isRedundantWrapper) {
+      await paintBackground(el, cs, r, group);
+      paintBorder(el, cs, r, group);
+    } else {
+      paintBorder(el, cs, r, group);
+    }
+
+    const tag = el.tagName;
+    if (tag === 'IMG' || tag === 'VIDEO') {
+      let src = tag === 'VIDEO' ? (el.getAttribute('poster') || '') : (el.currentSrc || el.getAttribute('src') || '');
+      if (src) {
+        const href = await inlineImage(src);
+        const op = parseFloat(cs.opacity || '1');
+        const opacity = op < 0.999 ? ` opacity="${num(op)}"` : '';
+        const fit = cs.objectFit || 'fill';
+        const par = fit === 'contain' ? 'xMidYMid meet' : fit === 'cover' ? 'xMidYMid slice' : 'none';
+        pushLayer(group, layerId(el), `<image id="${svgEsc(layerId(el))}" x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" href="${svgEsc(href)}" xlink:href="${svgEsc(href)}" preserveAspectRatio="${par}"${opacity}/>`, 'image');
+      }
+    } else if (tag === 'SVG' && r.w > 2 && r.h > 2) {
+      try {
+        const clone = el.cloneNode(true);
+        clone.setAttribute('x', String(r.x));
+        clone.setAttribute('y', String(r.y));
+        clone.setAttribute('width', String(r.w));
+        clone.setAttribute('height', String(r.h));
+        pushLayer(group, layerId(el), clone.outerHTML, 'svg');
+      } catch { /* skip */ }
+    }
+
+    await paintPseudo(el, '::after', group);
+  }
+
+  async function paintTextNodes() {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node?.nodeValue || !String(node.nodeValue).trim()) return NodeFilter.FILTER_REJECT;
+        const p = node.parentElement;
+        if (!p || skipRoot(p)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    while (walker.nextNode() && layers.length < maxLayers) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      const cs = getComputedStyle(parent);
+      if (!isVisible(cs)) continue;
+
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rects = [...range.getClientRects()].filter((rc) => rc.width >= 0.5 && rc.height >= 0.5);
+      if (!rects.length) continue;
+
+      const raw = String(node.nodeValue).replace(/\s+/g, ' ').trim();
+      if (!raw || raw.length > 2000) continue;
+      const display = applyTextTransform(raw, cs.textTransform);
+      const lines = splitTextLines(display, rects, cs);
+      const fontSize = parseFloat(cs.fontSize) || 16;
+      const fontFamily = (cs.fontFamily || 'Inter').split(',')[0].replace(/['"]/g, '').trim() || 'Inter';
+      const section = parent.closest('section[id], section[aria-label], main, header, footer, nav');
+      const group = section ? layerId(section) : 'Page';
+
+      for (const line of lines) {
+        if (!line.text) continue;
+        const rc = line.rect;
+        const x = num(rc.left + window.scrollX);
+        const y = num(rc.top + window.scrollY);
+        const key = `${line.text}@@${Math.round(x)}@@${Math.round(y)}`;
+        if (seenText.has(key)) continue;
+        seenText.add(key);
+
+        const baseline = num(y + fontSize * 0.82);
+        const op = parseFloat(cs.opacity || '1');
+        const opacity = op < 0.999 ? ` opacity="${num(op)}"` : '';
+        const fontStyle = /italic/i.test(cs.fontStyle || '') ? 'italic' : 'normal';
+        pushLayer(
+          group,
+          `text-${layers.length}`,
+          `<text id="text-${layers.length}" x="${x}" y="${baseline}" fill="${svgEsc(cs.color || '#000')}" font-family="${svgEsc(fontFamily)}" font-size="${num(fontSize)}" font-weight="${svgEsc(String(cs.fontWeight || '400'))}" font-style="${fontStyle}" letter-spacing="${svgEsc(cs.letterSpacing || 'normal')}" xml:space="preserve"${opacity}>${svgEsc(line.text)}</text>`,
+          'text',
+        );
+      }
+    }
+  }
+
+  const allEls = [...document.body.querySelectorAll('*')];
+
+  // Page-level backgrounds (html/body gradients and fills).
+  for (const rootEl of [document.documentElement, document.body]) {
+    const cs = getComputedStyle(rootEl);
+    if (!isVisible(cs)) continue;
+    const r = { x: 0, y: 0, w: width, h: height };
+    await paintBackground(rootEl, cs, r, 'Page');
+  }
+
+  for (const el of allEls) {
+    if (layers.length >= maxLayers) break;
+    await paintElement(el);
+  }
+  await paintTextNodes();
+
+  const bodyBg = getComputedStyle(document.body).backgroundColor;
+  const pageBg = parseAlpha(bodyBg) > 0.04 ? bodyBg : (parseAlpha(getComputedStyle(document.documentElement).backgroundColor) > 0.04
+    ? getComputedStyle(document.documentElement).backgroundColor
+    : '#ffffff');
+
+  const groups = new Map();
+  groups.set('Page', []);
+  for (const layer of layers) {
+    if (!groups.has(layer.group)) groups.set(layer.group, []);
+    groups.get(layer.group).push(layer);
+  }
+
+  const parts = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+    `<title>${svgEsc(document.title || 'Clonyfy export')}</title>`,
+    '<desc>Clonyfy scene graph — vector layers from computed styles (no screenshots)</desc>',
+  ];
+
+  if (defs.length) {
+    parts.push(`<defs>${defs.join('')}</defs>`);
+  }
+
+  parts.push(`<rect id="page-background" x="0" y="0" width="${width}" height="${height}" fill="${svgEsc(pageBg)}"/>`);
+
+  for (const [name, items] of groups) {
+    if (!items.length) continue;
+    parts.push(`<g id="${svgEsc(name)}" data-clonyfy-section="true">`);
+    for (const item of items) parts.push(item.svg);
+    parts.push('</g>');
+  }
+
+  parts.push('</svg>');
+  return parts.join('\n');
+}

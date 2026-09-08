@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MODO — Modern Essentials</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#f9fafb;color:#111827}
+a{text-decoration:none;color:inherit}
+
+/* Top bar */
+.topbar{background:#111827;color:#9ca3af;font-size:12px;padding:9px 60px;text-align:center;letter-spacing:.03em}
+.topbar strong{color:#fff}
+
+/* Nav */
+nav{background:#fff;border-bottom:1px solid #f3f4f6;padding:0 60px;display:flex;align-items:center;justify-content:space-between;height:66px;position:sticky;top:0;z-index:100}
+.nav-logo{font-size:22px;font-weight:900;letter-spacing:2px;text-transform:uppercase}
+.nav-links{display:flex;gap:0}
+.nav-links a{padding:6px 16px;font-size:13px;font-weight:600;color:#374151;border-radius:4px;transition:all .15s}
+.nav-links a:hover{color:#111827}
+.nav-links a.sale{color:#ef4444}
+.nav-actions{display:flex;align-items:center;gap:6px}
+.nav-icon-btn{position:relative;width:38px;height:38px;display:flex;align-items:center;justify-content:center;border-radius:8px;cursor:pointer;font-size:18px;border:none;background:none;transition:background .15s}
+.nav-icon-btn:hover{background:#f3f4f6}
+.cart-count{position:absolute;top:4px;right:4px;width:16px;height:16px;background:#111827;color:#fff;border-radius:50%;font-size:9px;font-weight:800;display:flex;align-items:center;justify-content:center}
+.nav-search{display:flex;align-items:center;gap:8px;background:#f3f4f6;border-radius:8px;padding:8px 14px;width:220px}
+.nav-search input{background:none;border:none;outline:none;font-size:13px;font-family:inherit;color:#111827;flex:1;min-width:0}
+
+/* Hero banner */
+.hero-banner{background:linear-gradient(135deg,#111827 0%,#1f2937 100%);padding:70px 60px;display:grid;grid-template-columns:1fr 1fr;gap:60px;align-items:center;min-height:440px}
+.hero-tag{font-size:11px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:#6b7280;margin-bottom:14px}
+.hero-banner h1{font-size:48px;font-weight:900;color:#fff;line-height:1.05;letter-spacing:-1.5px;margin-bottom:18px}
+.hero-banner h1 em{font-style:normal;color:#d1fae5}
+.hero-banner p{font-size:16px;color:#6b7280;line-height:1.7;margin-bottom:32px}
+.hero-btns{display:flex;gap:12px}
+.btn-wht{padding:13px 28px;background:#fff;color:#111827;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;transition:all .15s}
+.btn-wht:hover{background:#f3f4f6;transform:translateY(-1px)}
+.btn-outline-wht{padding:12px 28px;background:transparent;border:1px solid #374151;color:#9ca3af;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.hero-img{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:16px;height:320px;display:flex;align-items:center;justify-content:center;font-size:90px}
+.hero-badge{display:inline-flex;align-items:center;gap:8px;background:#10b981;color:#fff;border-radius:4px;padding:6px 14px;font-size:12px;font-weight:700;margin-bottom:20px}
+
+/* Category strip */
+.cats{background:#fff;border-bottom:1px solid #f3f4f6;padding:18px 60px;display:flex;gap:6px;overflow-x:auto}
+.cat-pill{padding:8px 20px;border:1px solid #e5e7eb;border-radius:20px;font-size:13px;font-weight:600;color:#374151;cursor:pointer;white-space:nowrap;background:#fff;transition:all .15s;flex-shrink:0}
+.cat-pill:hover,.cat-pill.on{background:#111827;color:#fff;border-color:#111827}
+
+/* Products */
+.products-layout{max-width:1280px;margin:0 auto;padding:36px 60px;display:grid;grid-template-columns:230px 1fr;gap:36px}
+
+/* Filters */
+.filters{background:#fff;border:1px solid #f3f4f6;border-radius:14px;padding:24px;height:fit-content;position:sticky;top:100px}
+.filter-title{font-size:16px;font-weight:800;margin-bottom:20px}
+.filter-sec{margin-bottom:24px;padding-bottom:24px;border-bottom:1px solid #f9fafb}
+.filter-sec:last-child{margin-bottom:0;padding-bottom:0;border-bottom:none}
+.filter-sec-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#6b7280;margin-bottom:12px}
+.filter-opt{display:flex;align-items:center;gap:9px;margin-bottom:9px;cursor:pointer}
+.filter-opt input{width:15px;height:15px;accent-color:#111827;cursor:pointer}
+.filter-opt label{font-size:13px;color:#374151;cursor:pointer;flex:1}
+.filter-opt .filter-count{font-size:11px;color:#9ca3af}
+.price-range{display:flex;gap:8px;align-items:center;margin-top:8px}
+.price-input{flex:1;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:8px 10px;font-size:13px;font-family:inherit;outline:none;color:#111827;width:100%;min-width:0}
+.swatch-row{display:flex;gap:6px;flex-wrap:wrap}
+.color-swatch{width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:all .15s}
+.color-swatch.on,.color-swatch:hover{border-color:#111827;transform:scale(1.1)}
+
+/* Products grid */
+.products-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+.products-count{font-size:13px;color:#6b7280}
+.sort-sel{background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:7px 12px;font-size:13px;font-family:inherit;outline:none;color:#374151;cursor:pointer}
+.prod-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.prod-card{background:#fff;border:1px solid #f3f4f6;border-radius:14px;overflow:hidden;transition:all .2s;cursor:pointer}
+.prod-card:hover{box-shadow:0 4px 24px rgba(0,0,0,.08);transform:translateY(-2px);border-color:#e5e7eb}
+.prod-img{height:220px;display:flex;align-items:center;justify-content:center;font-size:60px;position:relative}
+.prod-badge{position:absolute;top:12px;left:12px;padding:4px 10px;border-radius:4px;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+.badge-new{background:#10b981;color:#fff}
+.badge-sale{background:#ef4444;color:#fff}
+.prod-body{padding:16px}
+.prod-cat{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9ca3af;margin-bottom:6px}
+.prod-name{font-size:15px;font-weight:700;margin-bottom:4px;color:#111827;line-height:1.35}
+.prod-rating{display:flex;align-items:center;gap:5px;margin-bottom:10px}
+.prod-stars{color:#f59e0b;font-size:12px}
+.prod-review-count{font-size:11px;color:#9ca3af}
+.prod-price-row{display:flex;align-items:center;justify-content:space-between}
+.prod-price{font-size:17px;font-weight:800;color:#111827}
+.prod-old-price{font-size:13px;color:#9ca3af;text-decoration:line-through;margin-left:6px;font-weight:400}
+.add-cart-btn{width:32px;height:32px;background:#111827;color:#fff;border:none;border-radius:7px;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s;flex-shrink:0}
+.add-cart-btn:hover{background:#374151}
+.load-more{text-align:center;margin-top:36px}
+.load-more-btn{padding:13px 40px;border:2px solid #111827;color:#111827;background:transparent;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;transition:all .15s}
+.load-more-btn:hover{background:#111827;color:#fff}
+
+/* Promo strip */
+.promo-strip{background:#111827;padding:36px 60px;display:flex;justify-content:center;gap:80px;margin-top:60px}
+.promo-item{text-align:center;color:#fff}
+.promo-icon{font-size:26px;margin-bottom:8px}
+.promo-title{font-size:13px;font-weight:700;margin-bottom:4px}
+.promo-sub{font-size:12px;color:#6b7280}
+
+/* Footer */
+footer{background:#1f2937;color:#6b7280;padding:50px 60px 28px}
+.footer-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:40px;margin-bottom:40px}
+.footer-logo{font-size:20px;font-weight:900;letter-spacing:2px;color:#fff;margin-bottom:12px}
+.footer-desc{font-size:13px;line-height:1.7;margin-bottom:18px}
+.footer-email{display:flex;gap:0;margin-top:12px}
+.footer-email input{flex:1;padding:10px 14px;background:#111827;border:1px solid #374151;border-right:none;border-radius:6px 0 0 6px;color:#fff;font-size:13px;outline:none;font-family:inherit}
+.footer-email button{padding:10px 16px;background:#10b981;color:#fff;border:none;border-radius:0 6px 6px 0;font-size:13px;font-weight:700;cursor:pointer}
+.footer-col-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9ca3af;margin-bottom:14px}
+.footer-col a{display:block;font-size:13px;margin-bottom:8px;color:#4b5563;transition:color .15s}
+.footer-col a:hover{color:#9ca3af}
+.footer-bottom{border-top:1px solid #374151;padding-top:22px;display:flex;justify-content:space-between;align-items:center;font-size:12px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <strong>Free shipping</strong> on all orders over $75 · Use code <strong>MODO15</strong> for 15% off your first order
+</div>
+
+<nav>
+  <div class="nav-logo">MODO</div>
+  <div class="nav-links">
+    <a href="#">New Arrivals</a>
+    <a href="#">Men</a>
+    <a href="#">Women</a>
+    <a href="#">Accessories</a>
+    <a href="#">Home</a>
+    <a href="#" class="sale">Sale</a>
+  </div>
+  <div class="nav-actions">
+    <div class="nav-search">
+      <span>🔍</span>
+      <input type="text" placeholder="Search products...">
+    </div>
+    <button class="nav-icon-btn" title="Wishlist">♡</button>
+    <button class="nav-icon-btn" title="Account">👤</button>
+    <button class="nav-icon-btn" title="Cart">
+      🛒
+      <span class="cart-count">3</span>
+    </button>
+  </div>
+</nav>
+
+<section class="hero-banner">
+  <div>
+    <div class="hero-badge">🌿 Spring Collection 2025</div>
+    <h1>Timeless design,<br>built to <em>last</em></h1>
+    <p>Carefully crafted essentials that work for every season. Sustainably sourced, thoughtfully made, designed to endure.</p>
+    <div class="hero-btns">
+      <button class="btn-wht">Shop New Arrivals</button>
+      <button class="btn-outline-wht">Explore the Edit</button>
+    </div>
+  </div>
+  <div class="hero-img">👗</div>
+</section>
+
+<div class="cats">
+  <button class="cat-pill on">All Products</button>
+  <button class="cat-pill">New Arrivals</button>
+  <button class="cat-pill">Tops & Shirts</button>
+  <button class="cat-pill">Pants & Denim</button>
+  <button class="cat-pill">Outerwear</button>
+  <button class="cat-pill">Footwear</button>
+  <button class="cat-pill">Accessories</button>
+  <button class="cat-pill">Home & Living</button>
+  <button class="cat-pill">Sale</button>
+</div>
+
+<div class="products-layout">
+
+  <aside class="filters">
+    <div class="filter-title">Filters</div>
+
+    <div class="filter-sec">
+      <div class="filter-sec-title">Category</div>
+      <div class="filter-opt"><input type="checkbox" id="c1" checked><label for="c1">All Products</label><span class="filter-count">248</span></div>
+      <div class="filter-opt"><input type="checkbox" id="c2"><label for="c2">Tops</label><span class="filter-count">84</span></div>
+      <div class="filter-opt"><input type="checkbox" id="c3"><label for="c3">Bottoms</label><span class="filter-count">62</span></div>
+      <div class="filter-opt"><input type="checkbox" id="c4"><label for="c4">Outerwear</label><span class="filter-count">38</span></div>
+      <div class="filter-opt"><input type="checkbox" id="c5"><label for="c5">Accessories</label><span class="filter-count">64</span></div>
+    </div>
+
+    <div class="filter-sec">
+      <div class="filter-sec-title">Price Range</div>
+      <div class="price-range">
+        <input class="price-input" type="number" placeholder="Min $" value="0">
+        <span style="color:#9ca3af;font-size:13px;flex-shrink:0">–</span>
+        <input class="price-input" type="number" placeholder="Max $" value="300">
+      </div>
+    </div>
+
+    <div class="filter-sec">
+      <div class="filter-sec-title">Color</div>
+      <div class="swatch-row">
+        <div class="color-swatch on" style="background:#111827" title="Black"></div>
+        <div class="color-swatch" style="background:#fff;border:1px solid #e5e7eb" title="White"></div>
+        <div class="color-swatch" style="background:#6b7280" title="Grey"></div>
+        <div class="color-swatch" style="background:#1e3a5f" title="Navy"></div>
+        <div class="color-swatch" style="background:#92400e" title="Brown"></div>
+        <div class="color-swatch" style="background:#065f46" title="Green"></div>
+        <div class="color-swatch" style="background:#be185d" title="Pink"></div>
+      </div>
+    </div>
+
+    <div class="filter-sec">
+      <div class="filter-sec-title">Size</div>
+      <div class="swatch-row">
+        <div style="padding:6px 12px;border:1px solid #e5e7eb;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer">XS</div>
+        <div style="padding:6px 12px;border:1px solid #111827;background:#111827;color:#fff;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer">S</div>
+        <div style="padding:6px 12px;border:1px solid #e5e7eb;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer">M</div>
+        <div style="padding:6px 12px;border:1px solid #e5e7eb;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer">L</div>
+        <div style="padding:6px 12px;border:1px solid #e5e7eb;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer">XL</div>
+      </div>
+    </div>
+  </aside>
+
+  <div>
+    <div class="products-header">
+      <div class="products-count">Showing <strong>248 products</strong></div>
+      <select class="sort-sel">
+        <option>Sort: Featured</option>
+        <option>Price: Low to High</option>
+        <option>Price: High to Low</option>
+        <option>Newest First</option>
+        <option>Best Selling</option>
+      </select>
+    </div>
+
+    <div class="prod-grid">
+
+      <div class="prod-card">
+        <div class="prod-img" style="background:#f3f4f6">
+          <span class="prod-badge badge-new">New</span>
+          👔
+        </div>
+        <div class="prod-body">
+          <div class="prod-cat">Men's Tops</div>
+          <div class="prod-name">Essential Oxford Shirt</div>
+          <div class="prod-rating"><span class="prod-stars">★★★★★</span><span class="prod-review-count">(142)</span></div>
+          <div class="prod-price-row"><div><span class="prod-price">$89</span></div><button class="add-cart-btn">+</button></div>
+        </div>
+      </div>
+
+      <div class="prod-card">
+        <div class="prod-img" style="background:#fef9c3">
+          <span class="prod-badge badge-sale">-30%</span>
+          👗
+        </div>
+        <div class="prod-body">
+          <div class="prod-cat">Women's</div>
+          <div class="prod-name">Linen Midi Dress</div>
+          <div class="prod-rating"><span class="prod-stars">★★★★☆</span><span class="prod-review-count">(89)</span></div>
+          <div class="prod-price-row"><div><span class="prod-price">$105</span><span class="prod-old-price">$149</span></div><button class="add-cart-btn">+</button></div>
+        </div>
+      </div>
+
+      <div class="prod-card">
+        <div class="prod-img" style="background:#f0f9ff">
+          👟
+        </div>
+        <div class="prod-body">
+          <div class="prod-cat">Footwear</div>
+          <div class="prod-name">Canvas Low Sneaker</div>
+          <div class="prod-rating"><span class="prod-stars">★★★★★</span><span class="prod-review-count">(238)</span></div>
+          <div class="prod-price-row"><div><span class="prod-price">$120</span></div><button class="add-cart-btn">+</button></div>
+        </div>
+      </div>
+
+      <div class="prod-card">
+        <div class="prod-img" style="background:#f0fdf4">
+          <span class="prod-badge badge-new">New</span>
+          🧥
+        </div>
+        <div class="prod-body">
+          <div class="prod-cat">Outerwear</div>
+          <div class="prod-name">Recycled Bomber Jacket</div>
+          <div class="prod-rating"><span class="prod-stars">★★★★★</span><span class="prod-review-count">(56)</span></div>
+          <div class="prod-price-row"><div><span class="prod-price">$285</span></div><button class="add-cart-btn">+</button></div>
+        </div>
+      </div>
+
+      <div class="prod-card">
+        <div class="prod-img" style="background:#fdf2f8">
+          👜
+        </div>
+        <div class="prod-body">
+          <div class="prod-cat">Accessories</div>
+          <div class="prod-name">Leather Crossbody Bag</div>
+          <div class="prod-rating"><span class="prod-stars">★★★★☆</span><span class="prod-review-count">(103)</span></div>
+          <div class="prod-price-row"><div><span class="prod-price">$195</span></div><button class="add-cart-btn">+</button></div>
+        </div>
+      </div>
+
+      <div class="prod-card">
+        <div class="prod-img" style="background:#fff7ed">
+          <span class="prod-badge badge-sale">-20%</span>
+          👖
+        </div>
+        <div class="prod-body">
+          <div class="prod-cat">Men's Bottoms</div>
+          <div class="prod-name">Slim Chino Pants</div>
+          <div class="prod-rating"><span class="prod-stars">★★★★★</span><span class="prod-review-count">(187)</span></div>
+          <div class="prod-price-row"><div><span class="prod-price">$79</span><span class="prod-old-price">$99</span></div><button class="add-cart-btn">+</button></div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="load-more">
+      <button class="load-more-btn">Load More Products</button>
+    </div>
+  </div>
+
+</div>
+
+<div class="promo-strip">
+  <div class="promo-item"><div class="promo-icon">🚚</div><div class="promo-title">Free Shipping</div><div class="promo-sub">On orders over $75</div></div>
+  <div class="promo-item"><div class="promo-icon">↩️</div><div class="promo-title">Free Returns</div><div class="promo-sub">30-day return policy</div></div>
+  <div class="promo-item"><div class="promo-icon">🌿</div><div class="promo-title">Sustainably Made</div><div class="promo-sub">Ethical manufacturing</div></div>
+  <div class="promo-item"><div class="promo-icon">🔒</div><div class="promo-title">Secure Checkout</div><div class="promo-sub">SSL encrypted payments</div></div>
+</div>
+
+<footer>
+  <div class="footer-grid">
+    <div>
+      <div class="footer-logo">MODO</div>
+      <p class="footer-desc">Thoughtfully designed essentials for the modern wardrobe. Sustainable, timeless, made to last.</p>
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#4b5563;margin-bottom:10px">Stay updated</div>
+      <div class="footer-email">
+        <input type="email" placeholder="your@email.com">
+        <button>Join</button>
+      </div>
+    </div>
+    <div>
+      <div class="footer-col-title">Shop</div>
+      <div class="footer-col">
+        <a href="#">New Arrivals</a>
+        <a href="#">Men's</a>
+        <a href="#">Women's</a>
+        <a href="#">Accessories</a>
+        <a href="#">Sale</a>
+      </div>
+    </div>
+    <div>
+      <div class="footer-col-title">Help</div>
+      <div class="footer-col">
+        <a href="#">Size Guide</a>
+        <a href="#">Shipping</a>
+        <a href="#">Returns</a>
+        <a href="#">FAQ</a>
+        <a href="#">Contact Us</a>
+      </div>
+    </div>
+    <div>
+      <div class="footer-col-title">Company</div>
+      <div class="footer-col">
+        <a href="#">About MODO</a>
+        <a href="#">Sustainability</a>
+        <a href="#">Careers</a>
+        <a href="#">Press</a>
+        <a href="#">Affiliates</a>
+      </div>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <div>&copy; 2025 MODO Inc. All rights reserved.</div>
+    <div style="display:flex;gap:16px"><a href="#">Privacy</a><a href="#">Terms</a><a href="#">Cookies</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

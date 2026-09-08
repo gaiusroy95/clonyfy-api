@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font: 12px/1.45 Inter, system-ui, sans-serif;
+      margin: 0;
+      padding: 14px;
+      color: var(--figma-color-text, #111);
+    }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    p { margin: 0 0 10px; color: var(--figma-color-text-secondary, #555); }
+    textarea {
+      width: 100%;
+      height: 200px;
+      box-sizing: border-box;
+      font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      padding: 8px;
+      border: 1px solid var(--figma-color-border, #ddd);
+      border-radius: 6px;
+      resize: vertical;
+      background: var(--figma-color-bg, #fff);
+      color: inherit;
+    }
+    .row { display: flex; gap: 8px; margin-top: 10px; }
+    button {
+      flex: 1;
+      height: 32px;
+      border: 0;
+      border-radius: 6px;
+      font: 12px/1 Inter, system-ui, sans-serif;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    #import { background: #0d99ff; color: #fff; }
+    #clipboard, #sample { background: var(--figma-color-bg-secondary, #eee); color: inherit; }
+    #status { margin-top: 10px; min-height: 40px; white-space: pre-wrap; word-break: break-word; }
+    .err { color: #c00; }
+    .ok { color: #0a7; }
+    label.auto {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      margin: 0 0 10px;
+      cursor: pointer;
+      color: var(--figma-color-text-secondary, #555);
+    }
+    label.auto input { margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <h1>Clonyfy Import</h1>
+  <p>Export from Clonyfy, then Import. Install this plugin from <strong>Figma Community</strong> (customers). Use <strong>Import sample</strong> to verify.</p>
+  <label class="auto">
+    <input id="auto-import" type="checkbox" checked />
+    Auto-import from clipboard when this plugin opens
+  </label>
+  <textarea id="json" spellcheck="false" placeholder='{"kind":"clonyfy-figma-scene","version":1,...}'></textarea>
+  <div class="row">
+    <button id="clipboard" type="button">Read clipboard</button>
+    <button id="import" type="button">Import</button>
+  </div>
+  <div class="row">
+    <button id="sample" type="button" onclick="window.__clonyfyImportSample && window.__clonyfyImportSample()">Import sample</button>
+  </div>
+  <div id="status">Starting…</div>
+  <script>
+    window.onerror = function (message, source, line) {
+      var el = document.getElementById('status');
+      if (el) {
+        el.className = 'err';
+        el.textContent = 'UI error: ' + message + ' (line ' + line + ')';
+      }
+      return false;
+    };
+
+    const jsonEl = document.getElementById('json');
+    const statusEl = document.getElementById('status');
+    const autoEl = document.getElementById('auto-import');
+    const importBtn = document.getElementById('import');
+    const clipboardBtn = document.getElementById('clipboard');
+    const sampleBtn = document.getElementById('sample');
+    const CHUNK = 80000;
+    const INLINE_LIMIT = 350000;
+    let importing = false;
+    let unlockTimer = null;
+    let pongOk = false;
+
+    const SAMPLE = {
+      kind: 'clonyfy-figma-scene',
+      version: 1,
+      name: 'Plugin smoke test',
+      route: '/',
+      page: { width: 400, height: 200, fill: '#ffffff' },
+      nodes: [
+        {
+          type: 'FRAME',
+          name: 'card',
+          x: 40,
+          y: 40,
+          w: 320,
+          h: 120,
+          children: [
+            {
+              type: 'RECT',
+              name: 'bg',
+              x: 40,
+              y: 40,
+              w: 320,
+              h: 120,
+              fill: '#111111',
+              opacity: 1,
+              cornerRadius: 12,
+            },
+            {
+              type: 'TEXT',
+              name: 'title',
+              x: 64,
+              y: 80,
+              w: 240,
+              h: 40,
+              characters: 'Clonyfy works',
+              fill: '#ffffff',
+              fontFamily: 'Inter',
+              fontSize: 24,
+              fontWeight: '700',
+              fontStyle: 'normal',
+              letterSpacing: 0,
+              lineHeight: 32,
+              textAlign: 'LEFT',
+              textDecoration: 'none',
+              opacity: 1,
+            },
+          ],
+        },
+      ],
+    };
+
+    // Figma plugin UI runs as a data: URL — localStorage throws SecurityError.
+    // Persist auto-import via figma.clientStorage (main thread) instead.
+    autoEl.checked = true;
+
+    function setStatus(text, kind) {
+      statusEl.className = kind || '';
+      statusEl.textContent = text;
+    }
+
+    function setBusy(busy, label) {
+      importing = !!busy;
+      importBtn.disabled = !!busy;
+      clipboardBtn.disabled = !!busy;
+      sampleBtn.disabled = !!busy;
+      importBtn.textContent = busy ? (label || 'Importing…') : 'Import';
+      if (unlockTimer) {
+        clearTimeout(unlockTimer);
+        unlockTimer = null;
+      }
+      if (busy) {
+        unlockTimer = setTimeout(function () {
+          if (!importing) return;
+          setBusy(false);
+          setStatus('Timed out waiting for Figma. Try Import sample first. If sample works, the page scene may be too large — use Download SVG for Figma Web.', 'err');
+        }, 180000);
+      }
+    }
+
+    function looksLikeClonyfyScene(obj) {
+      return obj && obj.kind === 'clonyfy-figma-scene' && Number(obj.version) === 1 && Array.isArray(obj.nodes);
+    }
+
+    function parseSceneText(text) {
+      const t = String(text || '').trim().replace(/^\uFEFF/, '');
+      if (!t) throw new Error('Paste JSON first.');
+      let obj;
+      try {
+        obj = JSON.parse(t);
+      } catch (err) {
+        throw new Error('That is not valid JSON (' + (err && err.message ? err.message : 'parse error') + ').');
+      }
+      if (!looksLikeClonyfyScene(obj)) {
+        throw new Error('JSON is not a Clonyfy scene graph (need kind, version 1, nodes[]).');
+      }
+      return obj;
+    }
+
+    /** Shrink huge base64 images so the message can cross the UI↔main bridge. */
+    function slimScene(scene) {
+      const clone = JSON.parse(JSON.stringify(scene));
+      let stripped = 0;
+      function walk(nodes) {
+        for (var i = 0; i < (nodes || []).length; i++) {
+          var n = nodes[i];
+          if (n && n.type === 'IMAGE' && typeof n.src === 'string' && n.src.length > 120000) {
+            n.src = '__skipped__';
+            stripped += 1;
+          }
+          if (n && Array.isArray(n.children)) walk(n.children);
+        }
+      }
+      walk(clone.nodes);
+      return { scene: clone, stripped: stripped };
+    }
+
+    function post(msg) {
+      parent.postMessage({ pluginMessage: msg }, '*');
+    }
+
+    autoEl.onchange = function () {
+      post({ type: 'set-auto-import', value: !!autoEl.checked });
+    };
+
+    function sendScene(scene) {
+      const { scene: slim, stripped } = slimScene(scene);
+      const raw = JSON.stringify(slim);
+      if (stripped) {
+        setStatus('Sending scene (' + stripped + ' huge image(s) skipped)…', '');
+      }
+      if (raw.length <= INLINE_LIMIT) {
+        post({ type: 'import-scene', scene: slim });
+        return;
+      }
+      const id = 's' + Date.now().toString(36);
+      const chunks = Math.ceil(raw.length / CHUNK);
+      post({ type: 'import-scene-start', id, chunks, total: raw.length });
+      for (let i = 0; i < chunks; i++) {
+        post({
+          type: 'import-scene-chunk',
+          id,
+          index: i,
+          data: raw.slice(i * CHUNK, (i + 1) * CHUNK),
+        });
+      }
+      post({ type: 'import-scene-end', id });
+    }
+
+    function runImport(raw, { fromAuto } = {}) {
+      if (importing) {
+        setStatus('Import already running…', '');
+        return;
+      }
+      let scene;
+      try {
+        scene = typeof raw === 'object' && raw ? raw : parseSceneText(raw);
+      } catch (err) {
+        setStatus(err.message || String(err), fromAuto ? '' : 'err');
+        return;
+      }
+      if (typeof raw === 'string') jsonEl.value = raw.trim();
+      else jsonEl.value = JSON.stringify(scene, null, 2);
+      setBusy(true, 'Importing…');
+      setStatus(fromAuto ? 'Clonyfy scene found — importing…' : 'Importing…');
+      try {
+        sendScene(scene);
+      } catch (err) {
+        setBusy(false);
+        setStatus('Could not send scene to Figma: ' + (err.message || err), 'err');
+      }
+    }
+
+    clipboardBtn.onclick = async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (!text.trim()) {
+          setStatus('Clipboard is empty.', 'err');
+          return;
+        }
+        jsonEl.value = text;
+        parseSceneText(text);
+        setStatus('Clonyfy scene loaded (' + Math.round(text.length / 1024) + ' KB). Click Import.', 'ok');
+      } catch (err) {
+        setStatus('Could not read clipboard. Paste JSON into the box instead.', 'err');
+      }
+    };
+
+    importBtn.onclick = function () { runImport(jsonEl.value, { fromAuto: false }); };
+    sampleBtn.onclick = function () { runImport(SAMPLE, { fromAuto: false }); };
+    window.__clonyfyImportSample = function () { runImport(SAMPLE, { fromAuto: false }); };
+
+    window.onmessage = function (event) {
+      const msg = event.data && event.data.pluginMessage;
+      if (!msg) return;
+      if (msg.type === 'pong') {
+        pongOk = true;
+        return;
+      }
+      if (msg.type === 'auto-import') {
+        autoEl.checked = msg.value !== false;
+        return;
+      }
+      if (msg.type === 'progress') {
+        setStatus('Importing… ' + (msg.message || ''), '');
+        return;
+      }
+      if (msg.type === 'received') {
+        setStatus('Scene received — building layers in Figma…', '');
+        return;
+      }
+      if (msg.type === 'ok') {
+        setBusy(false);
+        setStatus('Imported ' + msg.count + ' layers.', 'ok');
+        return;
+      }
+      if (msg.type === 'error') {
+        setBusy(false);
+        setStatus(msg.message || 'Import failed', 'err');
+      }
+    };
+
+    async function tryAutoImport() {
+      post({ type: 'ping' });
+      post({ type: 'get-auto-import' });
+      setTimeout(function () {
+        if (!pongOk) {
+          setStatus('Plugin main bridge not responding. Re-import the plugin from manifest.json (Plugins → Development → Import plugin from manifest).', 'err');
+        }
+      }, 1500);
+
+      // Wait briefly for clientStorage preference, then proceed.
+      await new Promise(function (r) { setTimeout(r, 120); });
+
+      if (!autoEl.checked) {
+        setStatus('Ready. Click Import sample to verify, or Read clipboard / Import for a Clonyfy export.');
+        return;
+      }
+      setStatus('Checking clipboard…');
+      try {
+        const text = await navigator.clipboard.readText();
+        if (!text.trim()) {
+          setStatus('Ready. Click Import sample to verify the plugin, then export from Clonyfy.');
+          return;
+        }
+        jsonEl.value = text;
+        runImport(text, { fromAuto: true });
+      } catch (err) {
+        setStatus('Clipboard blocked — click Import sample to verify, or paste JSON and Import.');
+      }
+    }
+
+    tryAutoImport();
+  </script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "Clonyfy Import",
+  "id": "1677522506571131225",
+  "api": "1.0.0",
+  "editorType": ["figma"],
+  "main": "code.js",
+  "ui": "ui.html",
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["*"],
+    "reasoning": "Clonyfy scenes may reference https image URLs from the cloned website or CDNs. The plugin fetches those URLs only to create Figma IMAGE fills. Prefer inlined data: URLs when present; network is a fallback."
+  }
+}

@@ -1,0 +1,29 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { loadFixture, replayResponse } from '@/lib/replay';
+
+// Captured route: {{method}} {{path}}
+// Replace the fixture response with real business logic when ready.
+{{#if sampleRequest}}
+/*
+ * Sample request shape:
+ * {{{sampleRequest}}}
+ */
+{{/if}}
+
+export async function {{method}}(req: NextRequest) {
+  {{#if looksLikeForm}}
+  // This looks like a form submission endpoint.
+  // TODO: wire up Prisma to persist the data.
+  // import { PrismaClient } from '@prisma/client';
+  // const prisma = new PrismaClient();
+  // const body = await req.json();
+  // await prisma.{{modelName}}.create({ data: body });
+  {{/if}}
+
+  const fixture = loadFixture('{{fixtureKey}}', '{{method}}', {{defaultStatus}});
+  if (fixture !== null) {
+    return replayResponse(fixture);
+  }
+
+  return NextResponse.json({ ok: true });
+}

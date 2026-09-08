@@ -1,0 +1,25 @@
+{
+  "name": "cloned-{{siteName}}",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "db:push": "prisma db push"
+  },
+  "dependencies": {
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"{{#if hasPrisma}},
+    "@prisma/client": "^5.0.0"{{/if}}
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.0.0"{{#if hasPrisma}},
+    "prisma": "^5.0.0"{{/if}}
+  }
+}

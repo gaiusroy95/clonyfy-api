@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alex Morgan — Product Designer & Developer</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#fafafa;color:#111827}
+a{text-decoration:none;color:inherit}
+
+/* Nav */
+nav{display:flex;align-items:center;justify-content:space-between;padding:0 60px;height:64px;background:#fff;border-bottom:1px solid #f3f4f6;position:sticky;top:0;z-index:10}
+.nav-name{font-size:16px;font-weight:800;letter-spacing:-.3px}
+.nav-links{display:flex;gap:30px}
+.nav-links a{font-size:14px;color:#6b7280;font-weight:500;transition:color .15s}
+.nav-links a:hover{color:#111827}
+.nav-btn{padding:9px 20px;background:#111827;color:#fff;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none}
+
+/* Hero */
+.hero{background:#fff;padding:80px 60px;display:flex;align-items:center;gap:80px;max-width:1100px;margin:0 auto}
+.hero-text{flex:1}
+.hero-avail{display:inline-flex;align-items:center;gap:7px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:20px;padding:6px 14px;font-size:12px;color:#16a34a;font-weight:600;margin-bottom:24px}
+.avail-dot{width:7px;height:7px;background:#22c55e;border-radius:50%}
+.hero h1{font-size:52px;font-weight:900;line-height:1.08;letter-spacing:-2px;margin-bottom:18px}
+.hero h1 em{font-style:normal;color:#6366f1}
+.hero-bio{font-size:17px;color:#6b7280;line-height:1.75;margin-bottom:32px;max-width:460px}
+.hero-btns{display:flex;gap:12px}
+.btn-dark{padding:13px 28px;background:#111827;color:#fff;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;border:none}
+.btn-dark:hover{background:#1f2937}
+.btn-light{padding:13px 28px;background:#f9fafb;color:#374151;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid #e5e7eb}
+.hero-photo{width:320px;height:360px;flex-shrink:0;border-radius:20px;background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 50%,#ec4899 100%);display:flex;align-items:center;justify-content:center;font-size:80px}
+
+/* Skills */
+.skills-section{background:#f9fafb;padding:60px;border-top:1px solid #f3f4f6;border-bottom:1px solid #f3f4f6}
+.skills-inner{max-width:1100px;margin:0 auto}
+.skills-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#6b7280;margin-bottom:20px}
+.skills-tags{display:flex;flex-wrap:wrap;gap:10px}
+.skill-tag{padding:8px 18px;background:#fff;border:1px solid #e5e7eb;border-radius:20px;font-size:13px;font-weight:600;color:#374151}
+.skill-tag.featured{background:#6366f1;border-color:#6366f1;color:#fff}
+
+/* Projects */
+.projects{padding:90px 60px;max-width:1100px;margin:0 auto}
+.sec-hd{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:44px}
+.sec-title{font-size:36px;font-weight:900;letter-spacing:-.8px}
+.sec-link{font-size:13px;color:#6b7280;font-weight:600}
+.proj-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:24px}
+.proj-card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;transition:box-shadow .2s,transform .2s}
+.proj-card:hover{box-shadow:0 8px 32px rgba(0,0,0,.08);transform:translateY(-3px)}
+.proj-thumb{height:200px;display:flex;align-items:center;justify-content:center;font-size:48px}
+.proj-body{padding:24px}
+.proj-tags{display:flex;gap:8px;margin-bottom:12px}
+.proj-tag{padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+.proj-body h3{font-size:18px;font-weight:800;margin-bottom:8px;letter-spacing:-.2px}
+.proj-body p{font-size:14px;color:#6b7280;line-height:1.65;margin-bottom:16px}
+.proj-link{font-size:13px;font-weight:700;color:#6366f1;display:flex;align-items:center;gap:5px}
+
+/* About */
+.about{background:#111827;color:#e5e7eb;padding:90px 60px}
+.about-inner{max-width:1100px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:80px;align-items:center}
+.about h2{font-size:36px;font-weight:900;color:#fff;margin-bottom:20px;letter-spacing:-.5px}
+.about p{font-size:16px;line-height:1.8;color:#9ca3af;margin-bottom:20px}
+.about-stats{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.about-stat-n{font-size:36px;font-weight:900;color:#fff}
+.about-stat-l{font-size:13px;color:#6b7280;margin-top:4px}
+
+/* Contact */
+.contact{padding:90px 60px;text-align:center}
+.contact-inner{max-width:540px;margin:0 auto}
+.contact h2{font-size:38px;font-weight:900;letter-spacing:-.8px;margin-bottom:14px}
+.contact p{font-size:16px;color:#6b7280;line-height:1.7;margin-bottom:36px}
+.contact-form{display:flex;flex-direction:column;gap:14px;text-align:left}
+.contact-form input,.contact-form textarea{padding:13px 16px;border:1px solid #e5e7eb;border-radius:10px;font-size:14px;font-family:inherit;background:#fff;outline:none;color:#111827}
+.contact-form textarea{resize:vertical;min-height:120px}
+.contact-form button{padding:14px;background:#111827;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer}
+
+/* Footer */
+footer{background:#fff;border-top:1px solid #f3f4f6;padding:28px 60px;display:flex;justify-content:space-between;align-items:center}
+footer p{font-size:13px;color:#9ca3af}
+.social-links{display:flex;gap:20px}
+.social-links a{font-size:13px;color:#6b7280;font-weight:500}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-name">Alex Morgan</div>
+  <div class="nav-links">
+    <a href="#">Work</a>
+    <a href="#">About</a>
+    <a href="#">Blog</a>
+    <a href="#">Contact</a>
+  </div>
+  <button class="nav-btn">Hire Me</button>
+</nav>
+
+<section class="hero">
+  <div class="hero-text">
+    <div class="hero-avail"><div class="avail-dot"></div> Available for freelance work</div>
+    <h1>Design that <em>moves</em> people forward</h1>
+    <p class="hero-bio">I'm a product designer and front-end developer with 6 years of experience crafting beautiful, functional digital experiences for startups and Fortune 500 companies.</p>
+    <div class="hero-btns">
+      <button class="btn-dark">View My Work</button>
+      <button class="btn-light">Download CV</button>
+    </div>
+  </div>
+  <div class="hero-photo">👤</div>
+</section>
+
+<div class="skills-section">
+  <div class="skills-inner">
+    <div class="skills-label">Skills & Tools</div>
+    <div class="skills-tags">
+      <span class="skill-tag featured">Product Design</span>
+      <span class="skill-tag featured">React</span>
+      <span class="skill-tag featured">TypeScript</span>
+      <span class="skill-tag">Figma</span>
+      <span class="skill-tag">Node.js</span>
+      <span class="skill-tag">UI/UX</span>
+      <span class="skill-tag">CSS / Tailwind</span>
+      <span class="skill-tag">Design Systems</span>
+      <span class="skill-tag">Framer Motion</span>
+      <span class="skill-tag">Prototyping</span>
+      <span class="skill-tag">User Research</span>
+      <span class="skill-tag">Next.js</span>
+    </div>
+  </div>
+</div>
+
+<section class="projects">
+  <div class="sec-hd">
+    <h2 class="sec-title">Selected Projects</h2>
+    <a href="#" class="sec-link">View all projects →</a>
+  </div>
+  <div class="proj-grid">
+    <div class="proj-card">
+      <div class="proj-thumb" style="background:linear-gradient(135deg,#667eea,#764ba2)">📊</div>
+      <div class="proj-body">
+        <div class="proj-tags"><span class="proj-tag" style="background:#ede9fe;color:#7c3aed">Design</span><span class="proj-tag" style="background:#dbeafe;color:#2563eb">React</span></div>
+        <h3>Finova Dashboard</h3>
+        <p>Complete redesign of a fintech analytics platform, reducing task completion time by 40% and boosting NPS by 22 points.</p>
+        <a href="#" class="proj-link">View case study →</a>
+      </div>
+    </div>
+    <div class="proj-card">
+      <div class="proj-thumb" style="background:linear-gradient(135deg,#f093fb,#f5576c)">🛒</div>
+      <div class="proj-body">
+        <div class="proj-tags"><span class="proj-tag" style="background:#fce7f3;color:#be185d">UI/UX</span><span class="proj-tag" style="background:#dcfce7;color:#15803d">Next.js</span></div>
+        <h3>ShopFlow Ecommerce</h3>
+        <p>End-to-end design and development of a D2C fashion brand's online store. Conversion rate increased from 1.2% to 3.8%.</p>
+        <a href="#" class="proj-link">View case study →</a>
+      </div>
+    </div>
+    <div class="proj-card">
+      <div class="proj-thumb" style="background:linear-gradient(135deg,#4facfe,#00f2fe)">📱</div>
+      <div class="proj-body">
+        <div class="proj-tags"><span class="proj-tag" style="background:#e0f2fe;color:#0369a1">Mobile</span><span class="proj-tag" style="background:#f0fdf4;color:#15803d">Design System</span></div>
+        <h3>Wellpath Health App</h3>
+        <p>Designed the complete design system and mobile app for a health-tech startup. Shipped in 8 weeks, 50k+ active users.</p>
+        <a href="#" class="proj-link">View case study →</a>
+      </div>
+    </div>
+    <div class="proj-card">
+      <div class="proj-thumb" style="background:linear-gradient(135deg,#fa709a,#fee140)">✍️</div>
+      <div class="proj-body">
+        <div class="proj-tags"><span class="proj-tag" style="background:#fef9c3;color:#a16207">Branding</span><span class="proj-tag" style="background:#f3f4f6;color:#374151">Identity</span></div>
+        <h3>Bloom Creative Agency</h3>
+        <p>Full brand identity and website for a creative agency, including logo, typography system, and motion guidelines.</p>
+        <a href="#" class="proj-link">View case study →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="about">
+  <div class="about-inner">
+    <div>
+      <h2>A bit about me</h2>
+      <p>I believe great design is invisible — it simply works, feels right, and gets out of the way. I work at the intersection of design and code, which means I can speak both languages fluently.</p>
+      <p>When I'm not pushing pixels, you'll find me hiking in the mountains, experimenting with film photography, or obsessing over good typography.</p>
+      <button style="padding:12px 28px;background:#6366f1;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;margin-top:8px">Read full bio →</button>
+    </div>
+    <div class="about-stats">
+      <div><div class="about-stat-n">6+</div><div class="about-stat-l">Years of experience</div></div>
+      <div><div class="about-stat-n">80+</div><div class="about-stat-l">Projects shipped</div></div>
+      <div><div class="about-stat-n">30+</div><div class="about-stat-l">Happy clients</div></div>
+      <div><div class="about-stat-n">12</div><div class="about-stat-l">Design awards</div></div>
+    </div>
+  </div>
+</section>
+
+<section class="contact">
+  <div class="contact-inner">
+    <h2>Let's work together</h2>
+    <p>Got a project in mind? I'd love to hear about it. Send me a message and I'll get back to you within 24 hours.</p>
+    <form class="contact-form">
+      <input type="text" placeholder="Your name">
+      <input type="email" placeholder="Email address">
+      <textarea placeholder="Tell me about your project..."></textarea>
+      <button type="submit">Send Message</button>
+    </form>
+  </div>
+</section>
+
+<footer>
+  <p>&copy; 2025 Alex Morgan</p>
+  <div class="social-links">
+    <a href="#">Twitter</a>
+    <a href="#">LinkedIn</a>
+    <a href="#">Dribbble</a>
+    <a href="#">GitHub</a>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,101 @@
+{
+  "kind": "clonyfy-figma-scene",
+  "version": 1,
+  "name": "Step 5 sample",
+  "route": "/",
+  "page": {
+    "width": 800,
+    "height": 420,
+    "fill": "#ffffff"
+  },
+  "nodes": [
+    {
+      "type": "FRAME",
+      "name": "header",
+      "x": 0,
+      "y": 0,
+      "w": 800,
+      "h": 72,
+      "children": [
+        {
+          "type": "RECT",
+          "name": "header-fill",
+          "x": 0,
+          "y": 0,
+          "w": 800,
+          "h": 72,
+          "fill": {
+            "type": "GRADIENT_LINEAR",
+            "angle": 90,
+            "stops": [
+              { "color": "#111111", "position": 0 },
+              { "color": "#333333", "position": 1 }
+            ]
+          },
+          "opacity": 1,
+          "cornerRadius": 0
+        },
+        {
+          "type": "TEXT",
+          "name": "title",
+          "x": 24,
+          "y": 22,
+          "w": 200,
+          "h": 32,
+          "characters": "Clonyfy",
+          "fill": "#ffffff",
+          "fontFamily": "Inter",
+          "fontSize": 24,
+          "fontWeight": "700",
+          "fontStyle": "normal",
+          "letterSpacing": 0,
+          "lineHeight": 32,
+          "textAlign": "LEFT",
+          "textDecoration": "none",
+          "opacity": 1
+        }
+      ]
+    },
+    {
+      "type": "FRAME",
+      "name": "main",
+      "x": 40,
+      "y": 100,
+      "w": 720,
+      "h": 260,
+      "children": [
+        {
+          "type": "RECT",
+          "name": "card",
+          "x": 40,
+          "y": 100,
+          "w": 720,
+          "h": 240,
+          "fill": "#f5f5f5",
+          "opacity": 1,
+          "cornerRadius": 12,
+          "stroke": { "color": "#cccccc", "weight": 1 }
+        },
+        {
+          "type": "TEXT",
+          "name": "headline",
+          "x": 64,
+          "y": 140,
+          "w": 400,
+          "h": 48,
+          "characters": "Sell online",
+          "fill": "#111111",
+          "fontFamily": "Inter",
+          "fontSize": 32,
+          "fontWeight": "700",
+          "fontStyle": "normal",
+          "letterSpacing": 0,
+          "lineHeight": 40,
+          "textAlign": "LEFT",
+          "textDecoration": "none",
+          "opacity": 1
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Connect this Backend repo in the Render dashboard (or apply this blueprint).
+
+services:
+  - type: web
+    name: clonyfy-backend
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install && npm run build && npx playwright install chromium
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: CLONYFY_HOSTED
+        value: "1"
+      # Optional: mount a persistent disk and set CLONYFY_OUTPUT_DIR to that path.
+      # - key: CLONYFY_OUTPUT_DIR
+      #   value: /var/data/output
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: PASSWORD_PEPPER
+        sync: false
+      - key: SHARE_PASSWORD_PEPPER
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: FIGMA_COMMUNITY_PLUGIN_URL
+        sync: false

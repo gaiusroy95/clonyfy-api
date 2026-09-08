@@ -1,0 +1,10 @@
+# Supabase CLI config (optional — use `npm run db:push` after `npx supabase link`)
+# Docs: https://supabase.com/docs/guides/cli
+
+project_id = "clonyfy"
+
+[db]
+major_version = 15
+
+[db.migrations]
+enabled = true

@@ -1,0 +1,366 @@
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+
+let ROUTE_MAP: Record<string, string> = {};
+try {
+  ROUTE_MAP = JSON.parse(readFileSync(join(process.cwd(), 'route-map.json'), 'utf8'));
+} catch { /* missing on first run */ }
+const PAGES_DIR = join(process.cwd(), 'captured-pages');
+const TARGET_ORIGIN = {{{targetOriginJson}}};
+let ASSET_MAP: Record<string, string> = {};
+try {
+  const manifest = JSON.parse(readFileSync(join(process.cwd(), 'manifest.json'), 'utf8'));
+  for (const page of manifest.pages ?? []) {
+    for (const asset of page.assets ?? []) {
+      const original = String(asset.originalUrl || '');
+      const local = String(asset.localPath || '');
+      if (!original || !local) continue;
+      ASSET_MAP[original] = local;
+      ASSET_MAP[original.split('?')[0].split('#')[0]] = local;
+      try {
+        const u = new URL(original);
+        ASSET_MAP[`${u.pathname}${u.search}${u.hash}`] = local;
+        ASSET_MAP[`${u.pathname}${u.search}`] = local;
+        ASSET_MAP[u.pathname] = local;
+      } catch {}
+    }
+  }
+} catch { /* manifest is optional for older clones */ }
+
+// Importmap that redirects same-origin absolute module imports to the local server.
+// Must be injected as the very first script in <head> so it applies to all subsequent
+// <script type="module"> and dynamic import() calls.
+const IMPORT_MAP = `<script type="importmap">
+{"imports":{"${TARGET_ORIGIN}/":"/"}}
+</script>`;
+
+const REPLAY_PATCH = `<script data-clonyfy-replay>
+(() => {
+  const targetOrigin = ${JSON.stringify(TARGET_ORIGIN)};
+  const assetMap = ${JSON.stringify(ASSET_MAP)};
+
+  // Redirect same-origin absolute URLs to the local server
+  const localize = (value) => {
+    if (!value) return value;
+    const s = String(value);
+    if (assetMap[s]) return assetMap[s];
+    try {
+      const url = new URL(s, window.location.href);
+      if (assetMap[url.href]) return assetMap[url.href];
+      if (assetMap[url.pathname + url.search + url.hash]) return assetMap[url.pathname + url.search + url.hash];
+      if (assetMap[url.pathname + url.search]) return assetMap[url.pathname + url.search];
+      if (assetMap[url.pathname]) return assetMap[url.pathname];
+      if (url.pathname.startsWith('/media/')) {
+        const nextMediaPath = '/_next/static' + url.pathname;
+        if (assetMap[nextMediaPath + url.search]) return assetMap[nextMediaPath + url.search];
+        if (assetMap[nextMediaPath]) return assetMap[nextMediaPath];
+        return targetOrigin + nextMediaPath + url.search + url.hash;
+      }
+      if (url.pathname === '/_next/image') return targetOrigin + url.pathname + url.search + url.hash;
+      if (url.origin === targetOrigin) return url.pathname + url.search + url.hash;
+    } catch {}
+    return s;
+  };
+
+  const rewriteSrcset = (value) => String(value || '').split(',').map((part) => {
+    const trimmed = part.trim();
+    const spaceIdx = trimmed.search(/\\s/);
+    if (spaceIdx === -1) return localize(trimmed);
+    return localize(trimmed.slice(0, spaceIdx)) + trimmed.slice(spaceIdx);
+  }).join(', ');
+
+  const nativeSetAttribute = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function(name, value) {
+    const key = String(name || '').toLowerCase();
+    if (key === 'src' || key === 'href' || key === 'poster' || key === 'action' || key === 'data') value = localize(value);
+    else if (key === 'srcset' || key === 'imagesrcset') value = rewriteSrcset(value);
+    else if (key === 'style') value = rewriteCssText(value);
+    return nativeSetAttribute.call(this, name, value);
+  };
+
+  const patchUrlProperty = (proto, prop) => {
+    const desc = Object.getOwnPropertyDescriptor(proto, prop);
+    if (!desc || !desc.set || !desc.get) return;
+    Object.defineProperty(proto, prop, {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get() { return desc.get.call(this); },
+      set(value) { return desc.set.call(this, localize(value)); },
+    });
+  };
+  patchUrlProperty(HTMLScriptElement.prototype, 'src');
+  patchUrlProperty(HTMLLinkElement.prototype, 'href');
+  patchUrlProperty(HTMLImageElement.prototype, 'src');
+  patchUrlProperty(HTMLImageElement.prototype, 'srcset');
+
+  if (window.HTMLSourceElement) {
+    patchUrlProperty(HTMLSourceElement.prototype, 'src');
+    patchUrlProperty(HTMLSourceElement.prototype, 'srcset');
+  }
+  if (window.HTMLMediaElement) patchUrlProperty(HTMLMediaElement.prototype, 'src');
+  if (window.HTMLVideoElement) patchUrlProperty(HTMLVideoElement.prototype, 'poster');
+  if (window.HTMLIFrameElement) patchUrlProperty(HTMLIFrameElement.prototype, 'src');
+  if (window.HTMLObjectElement) patchUrlProperty(HTMLObjectElement.prototype, 'data');
+  if (window.HTMLEmbedElement) patchUrlProperty(HTMLEmbedElement.prototype, 'src');
+  if (window.HTMLFormElement) patchUrlProperty(HTMLFormElement.prototype, 'action');
+
+  function rewriteCssText(value) {
+    return String(value || '').replace(/url\\(\\s*(['"]?)([^'")\\s]+)\\1\\s*\\)/g, (match, quote, url) => {
+      const next = localize(url);
+      return next === url ? match : 'url(' + quote + next + quote + ')';
+    });
+  }
+
+  if (window.CSSStyleDeclaration) {
+    const nativeSetProperty = CSSStyleDeclaration.prototype.setProperty;
+    CSSStyleDeclaration.prototype.setProperty = function(name, value, priority) {
+      return nativeSetProperty.call(this, name, rewriteCssText(value), priority);
+    };
+    const bgDesc = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'backgroundImage');
+    if (bgDesc && bgDesc.set && bgDesc.get) {
+      Object.defineProperty(CSSStyleDeclaration.prototype, 'backgroundImage', {
+        configurable: true,
+        enumerable: bgDesc.enumerable,
+        get() { return bgDesc.get.call(this); },
+        set(value) { return bgDesc.set.call(this, rewriteCssText(value)); },
+      });
+    }
+  }
+  if (window.CSSStyleSheet) {
+    const nativeInsertRule = CSSStyleSheet.prototype.insertRule;
+    CSSStyleSheet.prototype.insertRule = function(rule, index) {
+      return nativeInsertRule.call(this, rewriteCssText(rule), index);
+    };
+  }
+
+  // fetch() — covers JSON API calls and module preloads
+  const nativeFetch = window.fetch;
+  window.fetch = function(input, init) {
+    if (typeof input === 'string' || input instanceof URL) {
+      return nativeFetch.call(this, localize(String(input)), init);
+    }
+    if (input && typeof input === 'object' && 'url' in input) {
+      try { input = new Request(localize(input.url), input); } catch {}
+    }
+    return nativeFetch.call(this, input, init);
+  };
+
+  // XMLHttpRequest — covers legacy AJAX
+  const nativeOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    return nativeOpen.call(this, method, localize(url), ...rest);
+  };
+
+  // sendBeacon — covers analytics pings (harmless but keeps network clean)
+  if (navigator.sendBeacon) {
+    const nativeBeacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = (url, data) => nativeBeacon(localize(url), data);
+  }
+
+  // Webpack/Vite chunk-loading public path — bundlers set this to the CDN base URL.
+  // Override it to '/' so dynamic chunk imports resolve against the local server.
+  const patchPublicPath = () => {
+    if (typeof __webpack_public_path__ !== 'undefined') {
+      try { __webpack_public_path__ = '/'; } catch {}
+    }
+    if (window.__webpack_public_path__) window.__webpack_public_path__ = '/';
+    if (window.__vite_public_path__)    window.__vite_public_path__    = '/';
+    if (window.webpackChunkName)        {} // chunk names are fine, no-op
+    // Parcel and Vite store the base in import.meta.env.BASE_URL — can't patch that,
+    // but the importmap above covers ESM dynamic imports from the original origin.
+  };
+  // Run now and after first script execution (bundler may set it after DOMContentLoaded)
+  patchPublicPath();
+  document.addEventListener('DOMContentLoaded', patchPublicPath, { once: true });
+
+  // Service worker unregistration — the original site's SW may intercept requests and
+  // proxy them to the original domain. Unregister all SWs so the clone is self-contained.
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistrations().then(regs => {
+      for (const reg of regs) reg.unregister();
+    }).catch(() => {});
+    // Prevent new SW registrations from taking effect in this session
+    const nativeRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+    navigator.serviceWorker.register = (...args) => {
+      console.debug('[CLONYFY] Suppressed SW registration:', args[0]);
+      return nativeRegister(...args).then(reg => { reg.unregister(); return reg; }).catch(() => ({}));
+    };
+  }
+})();
+</script>`;
+
+const VISIBILITY_PATCH = {{{visibilityPatchJson}}};
+const SCROLL_ANIMATIONS_PATCH = {{{scrollPatchJson}}};
+
+function resolveRoute(pathname: string): string | undefined {
+  // Normalize: collapse consecutive slashes, decode percent-encoding
+  let p = pathname;
+  try { p = decodeURIComponent(p).replace(/\/+/g, '/') || '/'; } catch {}
+
+  // Exact match
+  if (ROUTE_MAP[p]) return ROUTE_MAP[p];
+
+  // Strip trailing slash (but keep root /)
+  const noSlash = p.replace(/\/$/, '') || '/';
+  if (ROUTE_MAP[noSlash]) return ROUTE_MAP[noSlash];
+
+  // Add trailing slash
+  if (ROUTE_MAP[p + '/']) return ROUTE_MAP[p + '/'];
+
+  // Strip .html extension
+  if (p.endsWith('.html') && ROUTE_MAP[p.slice(0, -5)]) return ROUTE_MAP[p.slice(0, -5)];
+  // Add .html extension
+  if (!p.endsWith('.html') && ROUTE_MAP[p + '.html']) return ROUTE_MAP[p + '.html'];
+
+  // Try /path/index variants
+  if (ROUTE_MAP[noSlash + '/index']) return ROUTE_MAP[noSlash + '/index'];
+  if (ROUTE_MAP[noSlash + '/index.html']) return ROUTE_MAP[noSlash + '/index.html'];
+
+  // Fall back to root
+  return ROUTE_MAP['/'];
+}
+
+function revertPreviewAssetUrls(html: string): string {
+  let out = String(html || '');
+  out = out.replace(/\/api\/asset\?[^"'>\s]*?\bpath=([^"'>&\s]+)/gi, (_m, encoded) => {
+    try {
+      const decoded = decodeURIComponent(String(encoded).replace(/\+/g, ' '));
+      if (decoded.startsWith('/')) return decoded;
+      if (decoded.startsWith('_assets/')) return `/${decoded}`;
+      return `/${decoded}`;
+    } catch {
+      return '/_assets/';
+    }
+  });
+  return out;
+}
+
+function stripPreviewArtifacts(html: string): string {
+  let out = revertPreviewAssetUrls(html);
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-preview-nav\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<base\b[^>]*>/gi, '');
+  return out;
+}
+
+function rewriteUncapturedMedia(html: string): string {
+  const origin = TARGET_ORIGIN;
+  if (!origin || !/^https?:\/\//.test(origin)) return html;
+  const MEDIA_EXT = 'mp4|webm|ogg|ogv|mov|m4v|mp3|wav|m4a|flac|jpg|jpeg|png|gif|svg|webp|avif|ico|bmp|woff2?|ttf|eot|otf|pdf|css';
+  const attrRe = new RegExp(
+    `(\\b(?:src|href|poster|data-src|data-lazy-src|data-original|data-bg|data-image)\\s*=\\s*["'])(/(?!_assets/|api/|/)[^"'?#\\s]*\\.(?:${MEDIA_EXT}))`,
+    'gi',
+  );
+  let out = String(html || '').replace(attrRe, (_m, attr, path) => `${attr}${origin}${path}`);
+  const extTest = new RegExp(`\\.(?:${MEDIA_EXT})$`, 'i');
+  out = out.replace(/(\bsrcset\s*=\s*["'])([^"']+)(["'])/gi, (_m, pre, val, post) => {
+    const fixed = val.split(',').map((part: string) => {
+      const seg = part.trim();
+      if (!seg) return seg;
+      const sp = seg.search(/\s/);
+      const url = sp === -1 ? seg : seg.slice(0, sp);
+      const desc = sp === -1 ? '' : seg.slice(sp);
+      if (/^\/(?!_assets\/|api\/|\/)/.test(url) && extTest.test(url.split(/[?#]/)[0])) {
+        return `${origin}${url}${desc}`;
+      }
+      return seg;
+    }).join(', ');
+    return `${pre}${fixed}${post}`;
+  });
+  return out;
+}
+
+function stripStaleClonyfyPatches(html: string): string {
+  let out = String(html || '');
+  out = out.replace(/<script\b[^>]*\btype\s*=\s*["']importmap["'][^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-replay\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bdata-clonyfy-scroll-reveal\b[^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<script\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_script__["'][^>]*>[\s\S]*?<\/script>/gi, '');
+  out = out.replace(/<style\b[^>]*\bid\s*=\s*["']__clonyfy_visibility_fix__["'][^>]*>[\s\S]*?<\/style>/gi, '');
+  return out;
+}
+
+function injectReplayPatch(html: string): string {
+  let out = stripPreviewArtifacts(html);
+  out = stripStaleClonyfyPatches(out);
+  out = rewriteUncapturedMedia(out);
+
+  const headPatch = `<base href="/">${IMPORT_MAP}${REPLAY_PATCH}${VISIBILITY_PATCH}`;
+  const bodyPatch = out.includes('data-clonyfy-scroll-reveal') ? '' : SCROLL_ANIMATIONS_PATCH;
+
+  if (out.includes('<head>')) {
+    out = out.replace('<head>', `<head>${headPatch}`);
+  } else if (out.includes('<head ')) {
+    out = out.replace(/(<head[^>]*>)/, `$1${headPatch}`);
+  } else {
+    out = headPatch + out;
+  }
+  if (bodyPatch) {
+    if (out.includes('</body>')) out = out.replace('</body>', `${bodyPatch}</body>`);
+    else out += bodyPatch;
+  }
+  return neutralizeCloneScripts(out);
+}
+
+/** Disable original-site scripts; keep Clonyfy patches + JSON-LD / importmap. */
+function neutralizeCloneScripts(html: string): string {
+  let out = String(html || '');
+  out = out.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, (match, attrs = '', body = '') => {
+    if (/data-clonyfy-/i.test(attrs) || /id\s*=\s*["']__clonyfy_/i.test(attrs)) return match;
+    if (/data-clonyfy-disabled-script/i.test(attrs)) return match;
+    if (/\btype\s*=\s*["']application\/(?:ld\+json|json)["']/i.test(attrs)) return match;
+    if (/\btype\s*=\s*["']importmap["']/i.test(attrs)) return match;
+    let nextAttrs = String(attrs);
+    const typeMatch = nextAttrs.match(/\btype\s*=\s*(["'])(.*?)\1/i);
+    if (typeMatch) {
+      nextAttrs = nextAttrs.replace(/\btype\s*=\s*(["']).*?\1/i, '');
+      nextAttrs += ` data-clonyfy-original-type="${String(typeMatch[2]).replace(/"/g, '&quot;')}"`;
+    }
+    nextAttrs += ' data-clonyfy-disabled-script="true" type="text/plain"';
+    return `<script${nextAttrs}>${body}</script>`;
+  });
+  out = out.replace(/<link\b([^>]*)>/gi, (match, attrs = '') => {
+    const a = String(attrs);
+    const isModulePreload = /\brel\s*=\s*["']modulepreload["']/i.test(a);
+    const isScriptPreload = /\brel\s*=\s*["']preload["']/i.test(a) && /\bas\s*=\s*["']script["']/i.test(a);
+    if (!isModulePreload && !isScriptPreload) return match;
+    return `<!--clonyfy-disabled-script-preload ${match.replace(/<!--/g, '').replace(/-->/g, '')}-->`;
+  });
+  return out;
+}
+
+// Always render dynamically so each request gets the correct snapshot.
+export const dynamic = 'force-dynamic';
+
+export async function GET(
+  _request: Request,
+  { params }: { params: Promise<{ slug?: string[] }> },
+) {
+  const { slug } = await params;
+  const pathname = slug && slug.length > 0 ? `/${slug.join('/')}` : '/';
+
+  const filename = resolveRoute(pathname);
+
+  if (!filename) {
+    const available = Object.keys(ROUTE_MAP).join(', ') || '(none)';
+    return new Response(
+      `<!doctype html><html lang="en"><head><title>404 — Not captured</title></head><body style="font-family:system-ui;padding:32px"><h1>404 — Page not captured</h1><p>No snapshot exists for <code>${pathname}</code>.</p><details><summary>Available routes</summary><pre>${available}</pre></details></body></html>`,
+      { status: 404, headers: { 'content-type': 'text/html; charset=utf-8' } },
+    );
+  }
+
+  const htmlPath = join(PAGES_DIR, filename);
+  if (!existsSync(htmlPath)) {
+    return new Response(
+      `<!doctype html><html lang="en"><body><p>Snapshot file missing: ${filename}</p></body></html>`,
+      { status: 404, headers: { 'content-type': 'text/html; charset=utf-8' } },
+    );
+  }
+
+  const html = injectReplayPatch(readFileSync(htmlPath, 'utf8'));
+  return new Response(html, {
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+    },
+  });
+}

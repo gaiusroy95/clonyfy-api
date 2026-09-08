@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Craft — Stories on Design, Code & Culture</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#fff;color:#111827}
+a{text-decoration:none;color:inherit}
+
+/* Top bar */
+.topbar{background:#111827;color:#9ca3af;font-size:12px;padding:8px 60px;display:flex;justify-content:space-between;align-items:center}
+.topbar strong{color:#fff}
+
+/* Nav */
+nav{border-bottom:3px solid #111827;padding:0 60px;display:flex;align-items:center;justify-content:space-between;height:64px}
+.nav-logo{font-size:26px;font-weight:900;letter-spacing:-1px}
+.nav-logo em{font-style:normal;color:#ef4444}
+.nav-links{display:flex;gap:6px}
+.nav-links a{padding:6px 14px;font-size:13px;font-weight:600;color:#374151;border-radius:4px}
+.nav-links a:hover{background:#f3f4f6;color:#111827}
+.nav-links a.active{background:#111827;color:#fff}
+.nav-search{display:flex;align-items:center;gap:8px}
+.nav-search input{border:1px solid #e5e7eb;border-radius:6px;padding:7px 12px;font-size:13px;outline:none;font-family:inherit;width:180px}
+.btn-sub{padding:8px 18px;background:#ef4444;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer}
+
+/* Featured */
+.featured{padding:60px;border-bottom:1px solid #e5e7eb;display:grid;grid-template-columns:1fr 440px;gap:60px;align-items:center;max-width:1200px;margin:0 auto}
+.feat-label{display:inline-block;background:#ef4444;color:#fff;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.1em;padding:4px 10px;border-radius:4px;margin-bottom:18px}
+.featured h1{font-size:40px;font-weight:900;line-height:1.1;letter-spacing:-1px;margin-bottom:16px}
+.featured .excerpt{font-size:16px;color:#4b5563;line-height:1.75;margin-bottom:22px}
+.article-meta{display:flex;align-items:center;gap:12px}
+.author-avatar{width:36px;height:36px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.author-name{font-size:13px;font-weight:700}
+.article-date{font-size:12px;color:#9ca3af}
+.read-time{display:inline-block;padding:3px 9px;background:#f3f4f6;border-radius:4px;font-size:11px;font-weight:600;color:#374151}
+.feat-img{height:320px;border-radius:14px;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;align-items:center;justify-content:center;font-size:80px}
+
+/* Categories */
+.categories{padding:24px 60px;border-bottom:1px solid #e5e7eb;display:flex;gap:8px;overflow-x:auto}
+.cat-btn{padding:7px 18px;border:1px solid #e5e7eb;border-radius:20px;font-size:13px;font-weight:600;color:#374151;cursor:pointer;white-space:nowrap;background:#fff;transition:all .15s}
+.cat-btn:hover,.cat-btn.on{background:#111827;color:#fff;border-color:#111827}
+
+/* Articles */
+.articles-layout{max-width:1200px;margin:0 auto;padding:50px 60px;display:grid;grid-template-columns:1fr 280px;gap:52px}
+.articles-main h2{font-size:18px;font-weight:800;margin-bottom:28px;display:flex;align-items:center;gap:10px}
+.articles-main h2::after{content:'';flex:1;height:2px;background:#f3f4f6}
+.art-list{display:flex;flex-direction:column;gap:0}
+.art-item{display:grid;grid-template-columns:1fr 180px;gap:24px;padding:28px 0;border-bottom:1px solid #f3f4f6;align-items:start}
+.art-item:last-child{border-bottom:none}
+.art-tag{display:inline-block;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:#ef4444;margin-bottom:8px}
+.art-title{font-size:19px;font-weight:800;line-height:1.3;letter-spacing:-.3px;margin-bottom:8px;transition:color .15s}
+.art-title:hover{color:#ef4444}
+.art-excerpt{font-size:14px;color:#4b5563;line-height:1.65;margin-bottom:14px}
+.art-thumb{height:130px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:40px}
+
+/* Sidebar */
+.sidebar h3{font-size:14px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;margin-bottom:18px;color:#111827;padding-bottom:10px;border-bottom:2px solid #111827}
+.sidebar-section{margin-bottom:36px}
+.pop-art{padding:12px 0;border-bottom:1px solid #f3f4f6;display:flex;gap:14px;align-items:start}
+.pop-num{font-size:20px;font-weight:900;color:#e5e7eb;flex-shrink:0;width:28px}
+.pop-title{font-size:13px;font-weight:700;line-height:1.4;margin-bottom:4px}
+.pop-meta{font-size:11px;color:#9ca3af}
+.newsletter-box{background:#111827;border-radius:12px;padding:24px;text-align:center}
+.newsletter-box h4{color:#fff;font-size:15px;font-weight:800;margin-bottom:8px}
+.newsletter-box p{color:#6b7280;font-size:13px;line-height:1.6;margin-bottom:16px}
+.newsletter-box input{width:100%;padding:10px 12px;border-radius:6px;border:none;font-size:13px;margin-bottom:10px;font-family:inherit;background:#1f2937;color:#fff}
+.newsletter-box button{width:100%;padding:10px;background:#ef4444;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer}
+.tag-cloud{display:flex;flex-wrap:wrap;gap:6px}
+.tag{padding:5px 12px;border:1px solid #e5e7eb;border-radius:4px;font-size:12px;font-weight:600;color:#374151;cursor:pointer}
+.tag:hover{background:#111827;color:#fff;border-color:#111827}
+
+/* Footer */
+footer{background:#111827;color:#9ca3af;padding:50px 60px 30px}
+.footer-top{display:grid;grid-template-columns:2fr 1fr 1fr;gap:40px;margin-bottom:36px}
+.footer-logo{font-size:22px;font-weight:900;color:#fff;margin-bottom:12px}
+.footer-logo em{font-style:normal;color:#ef4444}
+.footer-desc{font-size:13px;line-height:1.7}
+.footer-col-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#6b7280;margin-bottom:14px}
+.footer-col a{display:block;font-size:13px;margin-bottom:8px;color:#6b7280}
+.footer-bottom{border-top:1px solid #1f2937;padding-top:20px;display:flex;justify-content:space-between;font-size:12px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div>📰 <strong>Weekly Digest:</strong> Get our top 5 stories every Friday morning</div>
+  <div>Subscribe → <strong>12,400 readers</strong></div>
+</div>
+
+<nav>
+  <div class="nav-logo">The<em>Craft</em></div>
+  <div class="nav-links">
+    <a href="#" class="active">Latest</a>
+    <a href="#">Design</a>
+    <a href="#">Code</a>
+    <a href="#">Culture</a>
+    <a href="#">Business</a>
+    <a href="#">Tools</a>
+  </div>
+  <div class="nav-search">
+    <input type="search" placeholder="Search articles...">
+    <button class="btn-sub">Subscribe</button>
+  </div>
+</nav>
+
+<div class="featured">
+  <div>
+    <span class="feat-label">Featured</span>
+    <h1>Why every developer should learn to design (and vice versa)</h1>
+    <p class="excerpt">The lines between design and engineering have never been blurrier — and that's actually a good thing. Here's why the most effective product teams are breaking down the silos.</p>
+    <div class="article-meta">
+      <div class="author-avatar">👩</div>
+      <div>
+        <div class="author-name">Maya Patel</div>
+        <div class="article-date">May 1, 2025</div>
+      </div>
+      <span class="read-time">8 min read</span>
+    </div>
+  </div>
+  <div class="feat-img">🎨</div>
+</div>
+
+<div class="categories">
+  <button class="cat-btn on">All</button>
+  <button class="cat-btn">Design</button>
+  <button class="cat-btn">Engineering</button>
+  <button class="cat-btn">AI & ML</button>
+  <button class="cat-btn">Productivity</button>
+  <button class="cat-btn">Career</button>
+  <button class="cat-btn">Open Source</button>
+  <button class="cat-btn">Interviews</button>
+  <button class="cat-btn">Tools</button>
+</div>
+
+<div class="articles-layout">
+  <div class="articles-main">
+    <h2>Latest Stories</h2>
+    <div class="art-list">
+
+      <div class="art-item">
+        <div>
+          <div class="art-tag">Engineering</div>
+          <div class="art-title">How we reduced our API response time by 70% without changing a line of business logic</div>
+          <p class="art-excerpt">A deep-dive into the caching strategy, database query optimization, and infrastructure changes that transformed our backend performance.</p>
+          <div class="article-meta" style="gap:10px">
+            <div class="author-avatar" style="width:28px;height:28px;font-size:14px">👨</div>
+            <div><div class="author-name" style="font-size:12px">Tom Barrett</div><div class="article-date">Apr 29, 2025</div></div>
+            <span class="read-time">12 min read</span>
+          </div>
+        </div>
+        <div class="art-thumb" style="background:linear-gradient(135deg,#4facfe,#00f2fe)">⚡</div>
+      </div>
+
+      <div class="art-item">
+        <div>
+          <div class="art-tag">Design</div>
+          <div class="art-title">The 10 design principles that top product teams actually follow</div>
+          <p class="art-excerpt">We interviewed designers at Stripe, Linear, and Notion to find out which design principles make the biggest difference in practice.</p>
+          <div class="article-meta" style="gap:10px">
+            <div class="author-avatar" style="width:28px;height:28px;font-size:14px;background:#ec4899">👩</div>
+            <div><div class="author-name" style="font-size:12px">Sarah Liu</div><div class="article-date">Apr 26, 2025</div></div>
+            <span class="read-time">6 min read</span>
+          </div>
+        </div>
+        <div class="art-thumb" style="background:linear-gradient(135deg,#f093fb,#f5576c)">🎯</div>
+      </div>
+
+      <div class="art-item">
+        <div>
+          <div class="art-tag">AI & ML</div>
+          <div class="art-title">Building AI-powered features that users actually love and trust</div>
+          <p class="art-excerpt">AI is only useful if people use it. Here's a practical guide to designing AI features with transparency, control, and genuine usefulness.</p>
+          <div class="article-meta" style="gap:10px">
+            <div class="author-avatar" style="width:28px;height:28px;font-size:14px;background:#10b981">🤖</div>
+            <div><div class="author-name" style="font-size:12px">Chris Nakamura</div><div class="article-date">Apr 22, 2025</div></div>
+            <span class="read-time">9 min read</span>
+          </div>
+        </div>
+        <div class="art-thumb" style="background:linear-gradient(135deg,#a8edea,#fed6e3)">🤖</div>
+      </div>
+
+      <div class="art-item">
+        <div>
+          <div class="art-tag">Career</div>
+          <div class="art-title">From IC to manager: the real challenges nobody warns you about</div>
+          <p class="art-excerpt">After three years as an engineering manager, here's what I wish someone had told me before making the switch.</p>
+          <div class="article-meta" style="gap:10px">
+            <div class="author-avatar" style="width:28px;height:28px;font-size:14px;background:#f59e0b">👤</div>
+            <div><div class="author-name" style="font-size:12px">Alex Johnson</div><div class="article-date">Apr 18, 2025</div></div>
+            <span class="read-time">7 min read</span>
+          </div>
+        </div>
+        <div class="art-thumb" style="background:linear-gradient(135deg,#ffecd2,#fcb69f)">🧭</div>
+      </div>
+
+    </div>
+  </div>
+
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <h3>Popular This Week</h3>
+      <div class="pop-art"><div class="pop-num">01</div><div><div class="pop-title">Why TypeScript is finally winning the JavaScript wars</div><div class="pop-meta">14.2k views · 6 min</div></div></div>
+      <div class="pop-art"><div class="pop-num">02</div><div><div class="pop-title">The anatomy of a great design system</div><div class="pop-meta">9.8k views · 8 min</div></div></div>
+      <div class="pop-art"><div class="pop-num">03</div><div><div class="pop-title">Ship faster without breaking things: a practical guide</div><div class="pop-meta">8.1k views · 5 min</div></div></div>
+      <div class="pop-art"><div class="pop-num">04</div><div><div class="pop-title">What makes a product truly intuitive</div><div class="pop-meta">6.4k views · 4 min</div></div></div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="newsletter-box">
+        <h4>Join 12,400 readers</h4>
+        <p>Get our weekly digest of the best stories on design, code, and craft.</p>
+        <input type="email" placeholder="you@example.com">
+        <button>Subscribe Free →</button>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <h3>Browse Topics</h3>
+      <div class="tag-cloud">
+        <span class="tag">Design Systems</span>
+        <span class="tag">React</span>
+        <span class="tag">CSS</span>
+        <span class="tag">TypeScript</span>
+        <span class="tag">AI</span>
+        <span class="tag">Leadership</span>
+        <span class="tag">Open Source</span>
+        <span class="tag">UX Research</span>
+        <span class="tag">Performance</span>
+        <span class="tag">Accessibility</span>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<footer>
+  <div class="footer-top">
+    <div>
+      <div class="footer-logo">The<em>Craft</em></div>
+      <p class="footer-desc">Independent journalism about design, engineering, and the craft of building great products. Published weekly since 2019.</p>
+    </div>
+    <div>
+      <div class="footer-col-title">Topics</div>
+      <a href="#">Design</a>
+      <a href="#">Engineering</a>
+      <a href="#">AI & ML</a>
+      <a href="#">Career & Culture</a>
+    </div>
+    <div>
+      <div class="footer-col-title">Company</div>
+      <a href="#">About</a>
+      <a href="#">Write for Us</a>
+      <a href="#">Advertise</a>
+      <a href="#">Newsletter</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <div>&copy; 2025 TheCraft Media. All rights reserved.</div>
+    <div style="display:flex;gap:16px"><a href="#">Privacy</a><a href="#">Terms</a><a href="#">RSS</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

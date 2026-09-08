@@ -1,0 +1,53 @@
+import { readFileSync, existsSync, readdirSync } from 'fs';
+import { join } from 'path';
+
+const FIXTURES_DIR = join(process.cwd(), 'fixtures');
+
+export interface CapturedFixture {
+  status: number;
+  contentType: string;
+  body: unknown;
+}
+
+export function loadFixture(fixtureKey: string, method: string, status = 200): CapturedFixture | null {
+  const base = join(FIXTURES_DIR, fixtureKey);
+  const candidates = [
+    `${base}.${method.toUpperCase()}.${status}.json`,
+    `${base}.${method.toUpperCase()}.200.json`,
+    `${base}.${method.toUpperCase()}.json`,
+    `${base}.json`,
+  ];
+  try {
+    for (const file of readdirSync(FIXTURES_DIR)) {
+      if (file.startsWith(`${fixtureKey}.${method.toUpperCase()}.`) && file.endsWith('.json')) {
+        candidates.push(join(FIXTURES_DIR, file));
+      }
+    }
+  } catch { /* fixtures directory may not exist */ }
+  for (const c of candidates) {
+    if (existsSync(c)) {
+      try {
+        const parsed = JSON.parse(readFileSync(c, 'utf8'));
+        if (parsed && typeof parsed === 'object' && 'body' in parsed) {
+          return {
+            status: Number(parsed.status) || 200,
+            contentType: String(parsed.contentType || 'application/json'),
+            body: parsed.body ?? null,
+          };
+        }
+        return { status: 200, contentType: 'application/json', body: parsed };
+      } catch { /* skip */ }
+    }
+  }
+  return null;
+}
+
+export function replayResponse(fixture: CapturedFixture): Response {
+  const contentType = fixture.contentType || 'application/json';
+  const isJson = contentType.includes('json') || typeof fixture.body === 'object';
+  const body = isJson ? JSON.stringify(fixture.body ?? null) : String(fixture.body ?? '');
+  return new Response(body, {
+    status: fixture.status || 200,
+    headers: { 'content-type': isJson ? 'application/json; charset=utf-8' : contentType },
+  });
+}
