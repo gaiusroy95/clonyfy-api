@@ -196,8 +196,8 @@ const IS_SERVERLESS = process.env.CLONYFY_SERVERLESS === '1' || process.env.CLON
 const IS_HOSTED = IS_RENDER
   || process.env.CLONYFY_HOSTED === '1'
   || process.env.NODE_ENV === 'production';
-const USE_INLINE_CLONE =
-  IS_SERVERLESS || process.env.CLONYFY_INLINE_CLONE === '1' || IS_RENDER;
+/** Inline clone only for serverless (no child process). Render/dedicated hosts spawn the CLI so /api/clone returns immediately and the UI can poll. */
+const USE_INLINE_CLONE = IS_SERVERLESS || process.env.CLONYFY_INLINE_CLONE === '1';
 const SERVERLESS_MAX_PAGES = Math.max(1, parseInt(process.env.CLONYFY_SERVERLESS_MAX_PAGES || '500', 10) || 500);
 /** Safety ceiling for Scale "Select all pages" (same-origin deep crawl). Raise on dedicated hosts. */
 const FULL_SITE_MAX_PAGES = Math.max(500, parseInt(process.env.CLONYFY_FULL_SITE_MAX_PAGES || '10000', 10) || 10000);
@@ -3763,65 +3763,62 @@ async function handleRequest(req, res) {
       };
 
       if (USE_INLINE_CLONE) {
-        try {
-          const result = await runClone({
-            url: targetUrl,
-            out: outDir,
-            maxPages: parseInt(maxPages, 10),
-            depth: parseInt(depth, 10) || 3,
-            concurrency: 1,
-            ignoreRobots: !!ignoreRobots,
-            verbose: false,
-            fullSite,
-          }, {
-            onLog: (line) => {
-              if (line) job.logs.push(line);
-              persistJob(job);
-            },
-            onArtifactWritten: offloadQueue
-              ? (event) => offloadQueue.offload(event)
-              : undefined,
-          });
-          if (offloadQueue) await offloadQueue.flush();
-          job.pages = result.pages;
-          job.assets = result.assets;
-          job.apiRoutes = result.apiRoutes;
-          await finalizeCloneJob(0);
-        } catch (err) {
-          const msg = String(err?.message || err);
-          job.logs.push(`[ERROR] ${msg}`);
-          if (job.offloadQueue) {
-            try { await job.offloadQueue.flush(); } catch {}
-          }
-          // Salvage partial results. The crawler writes captured pages and
-          // route-map.json incrementally, so a late-stage failure (e.g. ENOSPC
-          // while writing the manifest / generating the export project after the
-          // pages were already captured) can still leave a fully usable set of
-          // pages on disk. Persist those and finalize as a (partial) success
-          // instead of throwing the whole clone away.
-          let salvageable = 0;
+        // Never block the HTTP response on the crawl — Frontend needs job.id immediately to poll.
+        void (async () => {
           try {
-            const pagesDir = join(outDir, 'captured-pages');
-            const routeMapPath = join(outDir, 'route-map.json');
-            if (existsSync(routeMapPath)) {
-              salvageable = existsSync(pagesDir)
-                ? readdirSync(pagesDir).filter(f => f.endsWith('.html')).length
-                : 0;
-              if (salvageable === 0) {
-                const map = JSON.parse(readFileSync(routeMapPath, 'utf8'));
-                salvageable = Object.keys(map).length;
-              }
-            }
-          } catch {}
-          if (salvageable > 0) {
-            const diskFull = /ENOSPC|no space left/i.test(msg);
-            job.logs.push(`[WARN] ${diskFull ? 'Ran out of temporary storage during finalization' : 'Finalization failed'} — salvaging ${salvageable} captured page(s) so your clone is still usable.`);
-            if (job.offloadQueue) await job.offloadQueue.flush();
+            const result = await runClone({
+              url: targetUrl,
+              out: outDir,
+              maxPages: parseInt(maxPages, 10),
+              depth: parseInt(depth, 10) || 3,
+              concurrency: 1,
+              ignoreRobots: !!ignoreRobots,
+              verbose: false,
+              fullSite,
+            }, {
+              onLog: (line) => {
+                if (line) job.logs.push(line);
+                persistJob(job);
+              },
+              onArtifactWritten: offloadQueue
+                ? (event) => offloadQueue.offload(event)
+                : undefined,
+            });
+            if (offloadQueue) await offloadQueue.flush();
+            job.pages = result.pages;
+            job.assets = result.assets;
+            job.apiRoutes = result.apiRoutes;
             await finalizeCloneJob(0);
-          } else {
-            await finalizeCloneJob(1);
+          } catch (err) {
+            const msg = String(err?.message || err);
+            job.logs.push(`[ERROR] ${msg}`);
+            if (job.offloadQueue) {
+              try { await job.offloadQueue.flush(); } catch {}
+            }
+            let salvageable = 0;
+            try {
+              const pagesDir = join(outDir, 'captured-pages');
+              const routeMapPath = join(outDir, 'route-map.json');
+              if (existsSync(routeMapPath)) {
+                salvageable = existsSync(pagesDir)
+                  ? readdirSync(pagesDir).filter(f => f.endsWith('.html')).length
+                  : 0;
+                if (salvageable === 0) {
+                  const map = JSON.parse(readFileSync(routeMapPath, 'utf8'));
+                  salvageable = Object.keys(map).length;
+                }
+              }
+            } catch {}
+            if (salvageable > 0) {
+              const diskFull = /ENOSPC|no space left/i.test(msg);
+              job.logs.push(`[WARN] ${diskFull ? 'Ran out of temporary storage during finalization' : 'Finalization failed'} — salvaging ${salvageable} captured page(s) so your clone is still usable.`);
+              if (job.offloadQueue) await job.offloadQueue.flush();
+              await finalizeCloneJob(0);
+            } else {
+              await finalizeCloneJob(1);
+            }
           }
-        }
+        })();
       } else {
         const proc = spawn(process.execPath, [CLI, ...args], {
           cwd: __dirname,
