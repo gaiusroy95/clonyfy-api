@@ -1132,6 +1132,37 @@ function isInsideDir(baseDir, candidate) {
   return resolved === base || resolved.startsWith(base + '\\') || resolved.startsWith(base + '/');
 }
 
+/** Stable folder name for a clone output path (works across hosts / redeploys). */
+function outDirBasename(outDir) {
+  const parts = String(outDir || '').replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts[parts.length - 1] || '';
+}
+
+/**
+ * Normalize client/DB outDir to an absolute path under OUTPUT_DIR.
+ * Accepts absolute paths, relative paths, or bare folder names so preview/ZIP
+ * keep working after Render redeploys change the absolute prefix.
+ */
+function resolveCloneOutDir(candidate) {
+  const raw = String(candidate || '').trim();
+  if (!raw) return '';
+  if (isInsideOutputDir(raw)) return resolve(raw);
+  const base = outDirBasename(raw);
+  if (!base || base === '..' || base.includes('..')) return '';
+  // Clone folders look like www-shopify-com-a1b2c3 or builder-…
+  if (!/^[A-Za-z0-9._-]+$/.test(base)) return '';
+  const mapped = resolve(OUTPUT_DIR, base);
+  return isInsideOutputDir(mapped) ? mapped : '';
+}
+
+function sameCloneOutDir(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const ba = outDirBasename(a);
+  const bb = outDirBasename(b);
+  return !!ba && ba === bb;
+}
+
 function normalizeCloneRelPath(input, allowedPrefixes = []) {
   const normalized = String(input || '')
     .replace(/\\/g, '/')
@@ -1171,12 +1202,30 @@ function assetStorageRel(input) {
   return posixCloneRel('public', ...parts);
 }
 
+/** Preferred storage key: basename only (stable across absolute path changes). */
 function cloneStoragePrefix(outDir) {
+  const base = outDirBasename(outDir) || String(outDir || '');
+  return createHash('sha1').update(base).digest('hex').slice(0, 24);
+}
+
+/** Legacy key used before basename-stable prefixes (full absolute outDir). */
+function legacyCloneStoragePrefix(outDir) {
   return createHash('sha1').update(String(outDir || '')).digest('hex').slice(0, 24);
+}
+
+function cloneStoragePrefixes(outDir) {
+  const preferred = cloneStoragePrefix(outDir);
+  const legacy = legacyCloneStoragePrefix(outDir);
+  return preferred === legacy ? [preferred] : [preferred, legacy];
 }
 
 function cloneStoragePath(outDir, relPath) {
   return `${cloneStoragePrefix(outDir)}/${normalizeCloneRelPath(relPath)}`;
+}
+
+function cloneStoragePathCandidates(outDir, relPath) {
+  const rel = normalizeCloneRelPath(relPath);
+  return cloneStoragePrefixes(outDir).map((prefix) => `${prefix}/${rel}`);
 }
 
 function cloneFileListStoragePath(outDir) {
@@ -1184,7 +1233,16 @@ function cloneFileListStoragePath(outDir) {
 }
 
 function cloneAssetToken(outDir) {
-  return createHash('sha256').update(`${String(outDir || '')}:${PASSWORD_PEPPER}`).digest('hex').slice(0, 32);
+  const key = outDirBasename(outDir) || String(outDir || '');
+  return createHash('sha256').update(`${key}:${PASSWORD_PEPPER}`).digest('hex').slice(0, 32);
+}
+
+function cloneAssetTokenMatches(outDir, token) {
+  if (!token) return false;
+  if (token === cloneAssetToken(outDir)) return true;
+  // Legacy tokens hashed the full absolute path.
+  const legacy = createHash('sha256').update(`${String(outDir || '')}:${PASSWORD_PEPPER}`).digest('hex').slice(0, 32);
+  return token === legacy;
 }
 
 function contentTypeForPath(filePath) {
@@ -1214,7 +1272,11 @@ function contentTypeForPath(filePath) {
 async function persistCloneOutput(outDir, options = {}) {
   const deferAssets = !!options.deferAssets;
   const assetsOnly = !!options.assetsOnly;
-  if (!isInsideOutputDir(outDir) || !existsSync(outDir)) return { uploaded: 0, total: 0 };
+  const requireCritical = options.requireCritical !== false;
+  if (!isInsideOutputDir(outDir) || !existsSync(outDir)) {
+    if (requireCritical && !assetsOnly) throw new Error('Output folder missing on disk — cannot persist clone');
+    return { uploaded: 0, total: 0 };
+  }
   const files = [];
   const addFile = (rel) => {
     const abs = join(outDir, rel);
@@ -1255,16 +1317,22 @@ async function persistCloneOutput(outDir, options = {}) {
     const storagePath = cloneStoragePath(outDir, file.rel);
     const data = readFileSync(file.abs);
     try {
-      await uploadCloneFile(storagePath, data, contentTypeForPath(file.rel));
+      await uploadCloneFileWithRetry(storagePath, data, contentTypeForPath(file.rel), isCritical ? 6 : 4);
       uploaded++;
     } catch (err) {
       failures.push(`${file.rel}: ${err?.message || err}`);
       if (isCritical) {
-        try {
-          await saveCloneTextFile(storagePath, data.toString('utf8'));
-          fallbackSaved++;
-        } catch (fallbackErr) {
-          failures.push(`${file.rel} fallback: ${fallbackErr?.message || fallbackErr}`);
+        // settings-table fallback only for small text (large HTML often fails / blows row limits)
+        const asText = data.toString('utf8');
+        if (asText.length <= 900_000) {
+          try {
+            await saveCloneTextFile(storagePath, asText);
+            fallbackSaved++;
+            uploaded++;
+            return;
+          } catch (fallbackErr) {
+            failures.push(`${file.rel} fallback: ${fallbackErr?.message || fallbackErr}`);
+          }
         }
       }
     }
@@ -1283,20 +1351,40 @@ async function persistCloneOutput(outDir, options = {}) {
     });
 
   if (!assetsOnly) {
-    await runLimited(criticalFiles, 8);
+    if (!criticalFiles.some((f) => f.rel.startsWith('captured-pages/') && f.rel.endsWith('.html'))) {
+      if (requireCritical) throw new Error('No captured HTML pages found on disk to persist');
+      return { uploaded: 0, total: files.length, deferred: 0, critical: 0 };
+    }
+    await runLimited(criticalFiles, IS_HOSTED ? 4 : 8);
+    const criticalFail = failures.filter((f) =>
+      /route-map\.json|manifest\.json|captured-pages\//i.test(f),
+    );
+    if (requireCritical && criticalFail.length) {
+      throw new Error(`Failed to save clone pages to storage: ${criticalFail[0]}`);
+    }
     try {
       await saveCloneTextFile(cloneFileListStoragePath(outDir), JSON.stringify(criticalFiles.map(file => ({
         rel: file.rel,
         size: statSync(file.abs).size,
         contentType: contentTypeForPath(file.rel),
       }))));
+      // Also write under legacy prefix so older readers can find the list.
+      const legacyList = `${legacyCloneStoragePrefix(outDir)}/__files.json`;
+      if (legacyList !== cloneFileListStoragePath(outDir)) {
+        await saveCloneTextFile(legacyList, JSON.stringify(criticalFiles.map(file => ({
+          rel: file.rel,
+          size: statSync(file.abs).size,
+          contentType: contentTypeForPath(file.rel),
+        })))).catch(() => {});
+      }
     } catch (err) {
       failures.push(`__files.json critical: ${err?.message || err}`);
+      if (requireCritical) throw new Error(`Failed to save clone file index: ${err?.message || err}`);
     }
   }
 
   const finishAssets = async () => {
-    await runLimited(assetFiles, IS_HOSTED ? 6 : 8);
+    await runLimited(assetFiles, IS_HOSTED ? 4 : 8);
     try {
       await saveCloneTextFile(cloneFileListStoragePath(outDir), JSON.stringify(files.map(file => ({
         rel: file.rel,
@@ -1313,23 +1401,24 @@ async function persistCloneOutput(outDir, options = {}) {
   if (deferAssets && !assetsOnly) {
     console.log(`[clone storage] critical ${criticalFiles.length} files uploaded; deferring ${assetFiles.length} assets for ${outDir}`);
     void finishAssets().catch((err) => console.warn(`[clone storage] background assets failed: ${err?.message || err}`));
-    return { uploaded, total: files.length, deferred: assetFiles.length };
+    return { uploaded, total: files.length, deferred: assetFiles.length, critical: criticalFiles.length };
   }
 
   await finishAssets();
-  return { uploaded, total: files.length, deferred: 0 };
+  return { uploaded, total: files.length, deferred: 0, critical: criticalFiles.length };
 }
 
 async function readCloneFile(outDir, relPath) {
   const normalized = normalizeCloneRelPath(relPath);
   const localPath = join(outDir, normalized);
   if (isInsideOutputDir(localPath) && existsSync(localPath)) return readFileSync(localPath);
-  const storagePath = cloneStoragePath(outDir, normalized);
-  const stored = await downloadCloneFile(storagePath);
-  if (stored) return stored;
-  if (normalized === 'route-map.json' || normalized === 'manifest.json' || normalized.startsWith('captured-pages/')) {
-    const text = await getCloneTextFile(storagePath);
-    if (text != null) return Buffer.from(text, 'utf8');
+  for (const storagePath of cloneStoragePathCandidates(outDir, normalized)) {
+    const stored = await downloadCloneFile(storagePath);
+    if (stored) return stored;
+    if (normalized === 'route-map.json' || normalized === 'manifest.json' || normalized.startsWith('captured-pages/')) {
+      const text = await getCloneTextFile(storagePath);
+      if (text != null) return Buffer.from(text, 'utf8');
+    }
   }
   return null;
 }
@@ -1344,9 +1433,9 @@ async function writeCloneFile(outDir, relPath, bytes, contentType = contentTypeF
   }
   const storagePath = cloneStoragePath(outDir, normalized);
   try {
-    await uploadCloneFile(storagePath, buffer, contentType);
+    await uploadCloneFileWithRetry(storagePath, buffer, contentType, 5);
   } catch {
-    if (contentType.startsWith('text/') || contentType.includes('json')) {
+    if ((contentType.startsWith('text/') || contentType.includes('json')) && buffer.length <= 900_000) {
       await saveCloneTextFile(storagePath, buffer.toString('utf8'));
     } else {
       throw new Error('Could not persist clone file');
@@ -1404,7 +1493,11 @@ async function readPersistedJob(id) {
 }
 
 async function readPersistedCloneFileList(outDir) {
-  const raw = await getCloneTextFile(cloneFileListStoragePath(outDir)).catch(() => null);
+  let raw = null;
+  for (const listPath of cloneStoragePathCandidates(outDir, '__files.json')) {
+    raw = await getCloneTextFile(listPath).catch(() => null);
+    if (raw) break;
+  }
   if (!raw) {
     const map = await loadRouteMapAsync(outDir);
     if (!map) return [];
@@ -1451,6 +1544,7 @@ function cloneOutputHasPages(dir) {
 }
 
 async function materializeCloneOutput(outDir) {
+  outDir = resolveCloneOutDir(outDir) || outDir;
   if (!isInsideOutputDir(outDir)) throw new Error('Invalid output folder');
   // Local dir may exist but be empty/incomplete (e.g. ephemeral disk wiped mid-flight,
   // or a leftover empty folder). Only trust it when real page HTML is present.
@@ -1548,6 +1642,36 @@ async function verifyCloneReadable(outDir) {
     if (!page || !page.length) return { ok: false, error: `Captured page missing: ${filename}` };
   }
   return { ok: true, pages: Object.keys(map).length };
+}
+
+/**
+ * On hosted hosts, require pages to be reachable WITHOUT relying on ephemeral local disk.
+ * Temporarily ignore local files by reading storage candidates only.
+ */
+async function verifyCloneReadableFromStorage(outDir) {
+  const tryStorage = async (relPath) => {
+    for (const storagePath of cloneStoragePathCandidates(outDir, relPath)) {
+      const stored = await downloadCloneFile(storagePath);
+      if (stored?.length) return stored;
+      if (relPath === 'route-map.json' || relPath === 'manifest.json' || relPath.startsWith('captured-pages/')) {
+        const text = await getCloneTextFile(storagePath);
+        if (text != null && text.length) return Buffer.from(text, 'utf8');
+      }
+    }
+    return null;
+  };
+  const mapData = await tryStorage('route-map.json');
+  if (!mapData) return { ok: false, error: 'route-map.json not found in storage' };
+  let map;
+  try { map = JSON.parse(mapData.toString('utf8')); }
+  catch { return { ok: false, error: 'route-map.json in storage is invalid JSON' }; }
+  const entries = Object.entries(map || {}).filter(([, f]) => f);
+  if (!entries.length) return { ok: false, error: 'route-map.json in storage has no pages' };
+  for (const [, filename] of entries) {
+    const page = await tryStorage(capturedPageStorageRel(filename));
+    if (!page?.length) return { ok: false, error: `Storage missing page: ${filename}` };
+  }
+  return { ok: true, pages: entries.length };
 }
 
 function addAssetMapVariants(map, from, to) {
@@ -2529,17 +2653,17 @@ function userPublic(u) {
 async function userOwnsOutDir(user, outDir) {
   if (!outDir) return false;
   for (const job of jobs.values()) {
-    if (job.userId === user.id && job.outDir === outDir) return true;
+    if (job.userId === user.id && sameCloneOutDir(job.outDir, outDir)) return true;
   }
   const clones = await getClonesByUser(user.id);
-  return clones.some(c => c.out_dir === outDir);
+  return clones.some(c => sameCloneOutDir(c.out_dir, outDir));
 }
 
 async function canReadOutDir(user, outDir) {
   if (!outDir) return false;
   if (user) return userOwnsOutDir(user, outDir);
   for (const job of jobs.values()) {
-    if (job.userId === null && job.outDir === outDir) return true;
+    if (job.userId === null && sameCloneOutDir(job.outDir, outDir)) return true;
   }
   const clone = await getCloneByOutDir(outDir).catch(() => null);
   if (clone && clone.user_id == null) return true;
@@ -2548,7 +2672,13 @@ async function canReadOutDir(user, outDir) {
 
 async function canReadCloneRecord(user, outDir) {
   if (!outDir) return false;
-  const clone = await getCloneByOutDir(outDir).catch(() => null);
+  let clone = await getCloneByOutDir(outDir).catch(() => null);
+  if (!clone) {
+    const clones = user
+      ? await getClonesByUser(user.id).catch(() => [])
+      : await getAllClones().catch(() => []);
+    clone = (clones || []).find(c => sameCloneOutDir(c.out_dir, outDir)) || null;
+  }
   if (!clone) return false;
   if (!clone.user_id) return true;
   return !!user && (clone.user_id === user.id || user.role === 'admin');
@@ -3186,18 +3316,18 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/api/asset') {
     const assetUser = await getSessionUser(req);
-    const outDir = url.searchParams.get('outDir') || '';
+    const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
     let relPath;
     try { relPath = normalizeCloneRelPath(url.searchParams.get('path') || '', ['_assets', 'public/_assets']); }
     catch { return json(res, { error: 'Invalid asset' }, 400); }
     const assetToken = String(url.searchParams.get('assetToken') || '');
-    if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid asset' }, 400);
-    let readable = await canReadOutDir(assetUser, outDir) || assetToken === cloneAssetToken(outDir);
+    if (!outDir) return json(res, { error: 'Invalid asset' }, 400);
+    let readable = await canReadOutDir(assetUser, outDir) || cloneAssetTokenMatches(outDir, assetToken);
     if (!readable) {
       const shareId = String(url.searchParams.get('shareId') || '').replace(/[^a-z0-9]/gi, '');
       if (shareId) {
         const share = await getShare(shareId);
-        if (share?.out_dir === outDir) readable = true;
+        if (share && sameCloneOutDir(share.out_dir, outDir)) readable = true;
       }
     }
     if (!readable) return json(res, { error: assetUser ? 'Not found' : 'Not authenticated' }, assetUser ? 404 : 401);
@@ -3278,6 +3408,22 @@ async function handleRequest(req, res) {
               pages = readable.pages;
               updateCloneStatus({ id: c.id, status: 'done', pages }).catch(() => {});
             }
+          } else if (status === 'done') {
+            // Was marked complete but files are gone from disk/storage — don't fake Complete.
+            const recovered = await countClonePagesBestEffort(c.out_dir);
+            if (recovered > 0 && !IS_HOSTED) {
+              pages = recovered;
+              status = 'done';
+              updateCloneStatus({ id: c.id, status: 'done', pages: recovered }).catch(() => {});
+            } else {
+              status = 'error';
+              updateCloneStatus({
+                id: c.id,
+                status: 'error',
+                pages: pages || recovered || 0,
+                completedAt: c.completed_at || new Date().toISOString(),
+              }).catch(() => {});
+            }
           } else if ((Number(pages) || 0) <= 0) {
             // Recover page count from route-map / storage without wiping history.
             const recovered = await countClonePagesBestEffort(c.out_dir);
@@ -3295,10 +3441,10 @@ async function handleRequest(req, res) {
       normalized.push({
         id: c.id,
         name: c.out_dir.split(/[\\/]/).pop(),
-        dir: c.out_dir,
+        dir: resolveCloneOutDir(c.out_dir) || c.out_dir,
         targetOrigin: c.url,
         capturedAt: c.completed_at || c.started_at,
-        ...(localByDir[c.out_dir] || {}),
+        ...(localByDir[c.out_dir] || localByDir[resolveCloneOutDir(c.out_dir)] || {}),
         // Prefer DB/recovered metrics over local folder metadata (local may omit pages).
         status,
         pages,
@@ -3473,7 +3619,7 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/api/pages') {
     const pagesUser = await getSessionUser(req);
-    const outDir = url.searchParams.get('outDir');
+    const outDir = resolveCloneOutDir(url.searchParams.get('outDir'));
     if (!outDir) return json(res, []);
     if (!await canReadOutDir(pagesUser, outDir) && !await canReadCloneRecord(pagesUser, outDir)) {
       return json(res, { error: pagesUser ? 'Not found' : 'Not authenticated' }, pagesUser ? 404 : 401);
@@ -3485,7 +3631,7 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/api/page') {
     const pageUser = await getSessionUser(req);
-    const outDir = url.searchParams.get('outDir');
+    const outDir = resolveCloneOutDir(url.searchParams.get('outDir'));
     if (!outDir) { res.writeHead(404); res.end('No clone specified'); return; }
     if (!await canReadOutDir(pageUser, outDir) && !await canReadCloneRecord(pageUser, outDir)) {
       if (!pageUser) return json(res, { error: 'Not authenticated' }, 401);
@@ -3586,7 +3732,9 @@ async function handleRequest(req, res) {
     const saveUser = await getSessionUser(req);
     if (!saveUser) return json(res, { error: 'Not authenticated' }, 401);
     // 50MB limit — cloned pages with inlined assets can be several MB
-    readJsonBody(req, 50_000_000).then(async ({ outDir, route, html }) => {
+    readJsonBody(req, 50_000_000).then(async ({ outDir: rawOutDir, route, html }) => {
+      const outDir = resolveCloneOutDir(rawOutDir);
+      if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
       if (!await canUseCloneOutput(saveUser, outDir)) return json(res, { error: 'Not found' }, 404);
       const quota = await consumeUsageQuota(saveUser, 'save', { outDir, record: false });
       if (!quota.allowed) return json(res, { error: quota.error, usage: { kind: 'save', used: quota.used, limit: quota.limit } }, 429);
@@ -3608,8 +3756,9 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/create-auth-page') {
     const authPageUser = await getSessionUser(req);
     if (!authPageUser) return json(res, { error: 'Not authenticated' }, 401);
-    readJsonBody(req).then(async ({ outDir, kind }) => {
-      if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    readJsonBody(req).then(async ({ outDir: rawOutDir, kind }) => {
+      const outDir = resolveCloneOutDir(rawOutDir);
+      if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
       if (!await canUseCloneOutput(authPageUser, outDir)) return json(res, { error: 'Not found' }, 404);
       const pageKind = kind === 'register' ? 'register' : 'login';
       const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
@@ -3629,8 +3778,9 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/import-asset') {
     const assetUser = await getSessionUser(req);
     if (!assetUser) return json(res, { error: 'Not authenticated' }, 401);
-    readJsonBody(req).then(async ({ outDir, dataUrl, filename }) => {
-      if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    readJsonBody(req).then(async ({ outDir: rawOutDir, dataUrl, filename }) => {
+      const outDir = resolveCloneOutDir(rawOutDir);
+      if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
       if (!await canUseCloneOutput(assetUser, outDir)) return json(res, { error: 'Not found' }, 404);
       const match = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/);
       if (!match) return json(res, { error: 'Invalid file data' }, 400);
@@ -3659,9 +3809,10 @@ async function handleRequest(req, res) {
     const usageUser = await getSessionUser(req);
     if (!usageUser) return json(res, { error: 'Not authenticated' }, 401);
     if (usageUser.blocked) return await blockedUserResponse(res, usageUser);
-    const { kind, outDir } = await readJsonBody(req);
+    const { kind, outDir: rawOutDir } = await readJsonBody(req);
     if (!['edit', 'save', 'share'].includes(kind)) return json(res, { error: 'Invalid usage kind' }, 400);
-    if (outDir && !isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    const outDir = rawOutDir ? resolveCloneOutDir(rawOutDir) : '';
+    if (rawOutDir && !outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (outDir && !await canUseCloneOutput(usageUser, outDir)) return json(res, { error: 'Not found' }, 404);
     const quota = await consumeUsageQuota(usageUser, kind, { outDir });
     if (!quota.allowed) return json(res, { error: quota.error, usage: { kind, used: quota.used, limit: quota.limit } }, 429);
@@ -3862,19 +4013,25 @@ async function handleRequest(req, res) {
           try {
             if (job.offloadQueue) await job.offloadQueue.flush();
             // Critical HTML first so preview works; asset upload continues in background on hosted.
-            await persistCloneOutput(job.outDir, { deferAssets: IS_HOSTED });
+            await persistCloneOutput(job.outDir, { deferAssets: IS_HOSTED, requireCritical: true });
             cloneReadable = await verifyCloneReadableWithRetry(job.outDir);
             if (!cloneReadable.ok) {
-              await persistCloneOutput(job.outDir, { deferAssets: false });
+              await persistCloneOutput(job.outDir, { deferAssets: false, requireCritical: true });
               cloneReadable = await verifyCloneReadableWithRetry(job.outDir, 3);
             }
-            // On Render/hosted, confirm Storage has route-map so preview survives disk wipe.
+            // On Render/hosted, require Storage — local disk is ephemeral and will vanish on restart.
             if (IS_HOSTED && cloneReadable?.ok) {
-              const storedMap = await loadRouteMapAsync(job.outDir);
-              if (!storedMap) {
-                job.logs.push('[WARN] route-map not readable after persist — retrying storage upload');
-                await persistCloneOutput(job.outDir, { deferAssets: false });
-                cloneReadable = await verifyCloneReadableWithRetry(job.outDir, 3);
+              let stored = await verifyCloneReadableFromStorage(job.outDir);
+              if (!stored.ok) {
+                job.logs.push(`[WARN] Storage verify failed (${stored.error}) — re-uploading critical files`);
+                await persistCloneOutput(job.outDir, { deferAssets: false, requireCritical: true });
+                stored = await verifyCloneReadableFromStorage(job.outDir);
+              }
+              if (!stored.ok) {
+                cloneReadable = { ok: false, error: stored.error || 'Clone pages were not saved to storage' };
+                job.logs.push(`[ERROR] Clone finished on disk but Storage persist failed: ${cloneReadable.error}`);
+              } else {
+                cloneReadable = stored;
               }
             }
             if (cloneReadable?.ok && cloneReadable.pages > 0) {
@@ -3883,7 +4040,11 @@ async function handleRequest(req, res) {
               const recovered = await countClonePagesBestEffort(job.outDir);
               if (recovered > 0) {
                 job.pages = recovered;
-                cloneReadable = { ok: true, pages: recovered };
+                // Hosted still requires storage — don't mark ok from disk-only recovery.
+                if (!IS_HOSTED) cloneReadable = { ok: true, pages: recovered };
+                else if (!cloneReadable?.ok) {
+                  cloneReadable = { ok: false, error: 'Pages exist on disk but were not saved to durable storage' };
+                }
               } else {
                 cloneReadable = { ok: false, error: 'Clone captured 0 pages' };
               }
@@ -3897,7 +4058,7 @@ async function handleRequest(req, res) {
               try { rmSync(job.outDir, { recursive: true, force: true }); } catch {}
             }
           } catch (storageErr) {
-            job.logs.push(`[WARN] Could not persist all clone files: ${storageErr?.message || storageErr}`);
+            job.logs.push(`[ERROR] Could not persist clone files: ${storageErr?.message || storageErr}`);
             cloneReadable = { ok: false, error: storageErr?.message || String(storageErr) };
           }
         }
@@ -4031,6 +4192,16 @@ async function handleRequest(req, res) {
           env: childEnv,
         });
         job.proc = proc;
+        // While Chromium runs, periodically push captured HTML to Storage so a mid-clone
+        // crash/restart still leaves a previewable salvage.
+        const midPersistTimer = IS_HOSTED
+          ? setInterval(() => {
+            if (!isActiveJob(job) || !existsSync(outDir)) return;
+            persistCloneOutput(outDir, { deferAssets: true, requireCritical: false }).catch((err) => {
+              job.logs.push(`[WARN] Mid-clone storage sync: ${err?.message || err}`);
+            });
+          }, 25_000)
+          : null;
         const deadlineTimer = setTimeout(() => {
           if (!isActiveJob(job)) return;
           job.logs.push(`[WARN] Clone deadline (${Math.round(CLONE_DEADLINE_MS / 60000)} min) reached — stopping crawl and salvaging pages.`);
@@ -4048,6 +4219,7 @@ async function handleRequest(req, res) {
         });
         proc.on('close', (code, signal) => {
           clearTimeout(deadlineTimer);
+          if (midPersistTimer) clearInterval(midPersistTimer);
           finalizeCloneJob(code, signal).catch((err) => {
             job.status = 'error';
             job.logs.push(`[ERROR] Could not finalize clone: ${err?.message || err}`);
@@ -4086,8 +4258,9 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/preview') {
     const previewUser = await getSessionUser(req);
     if (!previewUser) return json(res, { error: 'Not authenticated' }, 401);
-    const { outDir } = await readJsonBody(req);
-    if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    const body = await readJsonBody(req);
+    const outDir = resolveCloneOutDir(body?.outDir);
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(previewUser, outDir)) return json(res, { error: 'Not found' }, 404);
     if (IS_HOSTED) {
       let map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
@@ -4128,8 +4301,9 @@ async function handleRequest(req, res) {
     const zipUser = await getSessionUser(req);
     if (!zipUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(zipUser.plan)) return json(res, { error: 'Export requires a paid plan. Upgrade to download your clones.' }, 403);
-    const { outDir } = await readJsonBody(req);
-    if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    const body = await readJsonBody(req);
+    const outDir = resolveCloneOutDir(body?.outDir);
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(zipUser, outDir)) return json(res, { error: 'Not found' }, 404);
     try {
       const { zipName, zipPath } = await buildOutputZip(outDir);
@@ -4149,8 +4323,8 @@ async function handleRequest(req, res) {
     const dlUser = await getSessionUser(req);
     if (!dlUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(dlUser.plan)) return json(res, { error: 'Export requires a paid plan. Upgrade to download your clones.' }, 403);
-    const outDir = url.searchParams.get('outDir') || '';
-    if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(dlUser, outDir)) return json(res, { error: 'Not found' }, 404);
     try {
       const { zipName, zipPath } = await buildOutputZip(outDir);
@@ -4195,18 +4369,19 @@ async function handleRequest(req, res) {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
-    const { html, outDir, viewportWidth: rawWidth, route, title } = await readJsonBody(req, 50_000_000);
+    const { html, outDir: rawOutDir, viewportWidth: rawWidth, route, title } = await readJsonBody(req, 50_000_000);
     if (!html) return json(res, { error: 'No HTML provided' }, 400);
+    const outDir = rawOutDir ? resolveCloneOutDir(rawOutDir) : '';
     const viewportWidth = Math.min(2560, Math.max(320, parseInt(rawWidth, 10) || 1440));
     try {
       let prepared = String(html);
-      if (outDir && isInsideOutputDir(outDir) && await canUseCloneOutput(figmaUser, outDir)) {
+      if (outDir && await canUseCloneOutput(figmaUser, outDir)) {
         prepared = await prepareHtmlForFigmaExport(prepared, outDir);
       }
       const svg = await htmlToFigmaSvg(prepared, {
         viewportWidth,
         title: title || route || 'Clonyfy export',
-        readAsset: IS_HOSTED && outDir && isInsideOutputDir(outDir) ? figmaAssetReader(outDir) : null,
+        readAsset: IS_HOSTED && outDir ? figmaAssetReader(outDir) : null,
       });
       audit(figmaUser.id, figmaUser.name, 'figma_render', `outDir=${outDir || ''} route=${route || ''}`, ip);
       res.writeHead(200, {
@@ -4232,7 +4407,8 @@ async function handleRequest(req, res) {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
-    const { html, svg, outDir, viewportWidth: rawWidth, route, title } = await readJsonBody(req, 50_000_000);
+    const { html, svg, outDir: rawOutDir, viewportWidth: rawWidth, route, title } = await readJsonBody(req, 50_000_000);
+    const outDir = rawOutDir ? resolveCloneOutDir(rawOutDir) : '';
     const viewportWidth = Math.min(2560, Math.max(320, parseInt(rawWidth, 10) || 1440));
     const sceneRoute = route || '/';
     const sceneTitle = title || sceneRoute || 'Clonyfy export';
@@ -4242,14 +4418,14 @@ async function handleRequest(req, res) {
         scene = svgToFigmaScene(String(svg), { name: sceneTitle, route: sceneRoute });
       } else if (html) {
         let prepared = String(html);
-        if (outDir && isInsideOutputDir(outDir) && await canUseCloneOutput(figmaUser, outDir)) {
+        if (outDir && await canUseCloneOutput(figmaUser, outDir)) {
           prepared = await prepareHtmlForFigmaExport(prepared, outDir);
         }
         scene = await htmlToFigmaScene(prepared, {
           viewportWidth,
           title: sceneTitle,
           route: sceneRoute,
-          readAsset: IS_HOSTED && outDir && isInsideOutputDir(outDir) ? figmaAssetReader(outDir) : null,
+          readAsset: IS_HOSTED && outDir ? figmaAssetReader(outDir) : null,
         });
       } else {
         return json(res, { error: 'Provide html or svg' }, 400);
@@ -4271,8 +4447,8 @@ async function handleRequest(req, res) {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
-    const outDir = url.searchParams.get('outDir') || '';
-    if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
     const route = url.searchParams.get('route') || '/';
     const viewportWidth = Math.min(2560, Math.max(320, parseInt(url.searchParams.get('width') || '1440', 10) || 1440));
@@ -4307,8 +4483,8 @@ async function handleRequest(req, res) {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
-    const outDir = url.searchParams.get('outDir') || '';
-    if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
     const route = url.searchParams.get('route') || '/';
     const viewportWidth = Math.min(2560, Math.max(320, parseInt(url.searchParams.get('width') || '1440', 10) || 1440));
@@ -4348,8 +4524,8 @@ async function handleRequest(req, res) {
     const figmaUser = await getSessionUser(req);
     if (!figmaUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(figmaUser.plan)) return json(res, { error: 'Figma export requires a paid plan. Upgrade to export designs.' }, 403);
-    const outDir = url.searchParams.get('outDir') || '';
-    if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    const outDir = resolveCloneOutDir(url.searchParams.get('outDir') || '');
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
     const viewportWidth = Math.min(2560, Math.max(320, parseInt(url.searchParams.get('width') || '1440', 10) || 1440));
     try {
@@ -4450,8 +4626,9 @@ async function handleRequest(req, res) {
     if (!ghUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(ghUser.plan)) return json(res, { error: 'GitHub push requires a paid plan. Upgrade to publish your clones.' }, 403);
     try {
-      const { outDir, token, repo, branch = 'main', targetPath = '', commitMessage = '', cleanTarget = false } = await readJsonBody(req, 200_000);
-      if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+      const { outDir: rawOutDir, token, repo, branch = 'main', targetPath = '', commitMessage = '', cleanTarget = false } = await readJsonBody(req, 200_000);
+      const outDir = resolveCloneOutDir(rawOutDir);
+      if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
       if (!await canUseCloneOutput(ghUser, outDir)) return json(res, { error: 'Not found' }, 404);
       if (!token || String(token).length < 20) return json(res, { error: 'GitHub token is required' }, 400);
       const parsedRepo = parseGitHubRepo(repo);
@@ -4544,15 +4721,18 @@ async function handleRequest(req, res) {
   if (req.method === 'DELETE' && url.pathname === '/api/output') {
     const deleteUser = await getSessionUser(req);
     if (!deleteUser) return json(res, { error: 'Not authenticated' }, 401);
-    const { outDir } = await readJsonBody(req);
-    if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    const body = await readJsonBody(req);
+    const outDir = resolveCloneOutDir(body?.outDir);
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(deleteUser, outDir)) return json(res, { error: 'Not found' }, 404);
     try {
       if (existsSync(outDir)) rmSync(outDir, { recursive: true, force: true });
       for (const [id, job] of jobs.entries()) {
-        if (job.outDir === outDir) jobs.delete(id);
+        if (sameCloneOutDir(job.outDir, outDir)) jobs.delete(id);
       }
-      const clone = await getCloneByOutDir(outDir).catch(() => null);
+      const clones = await getClonesByUser(deleteUser.id).catch(() => []);
+      const clone = (clones || []).find(c => sameCloneOutDir(c.out_dir, outDir))
+        || await getCloneByOutDir(outDir).catch(() => null);
       if (clone?.id) await deleteCloneById(clone.id);
       return json(res, { ok: true });
     } catch(err) { return json(res, { error: err.message }, 500); }
@@ -4563,8 +4743,12 @@ async function handleRequest(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/share/create') {
     const shareUser = await getSessionUser(req);
     if (!shareUser) return json(res, { error: 'Not authenticated' }, 401);
-    const { outDir, route, password, expiresInDays } = await readJsonBody(req);
-    if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    const body = await readJsonBody(req);
+    const outDir = resolveCloneOutDir(body?.outDir);
+    const route = body?.route;
+    const password = body?.password;
+    const expiresInDays = body?.expiresInDays;
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(shareUser, outDir)) return json(res, { error: 'Not found' }, 404);
     const quota = await consumeUsageQuota(shareUser, 'share', { outDir, record: false });
     if (!quota.allowed) return json(res, { error: quota.error, usage: { kind: 'share', used: quota.used, limit: quota.limit } }, 429);
@@ -5854,9 +6038,10 @@ async function handleRequest(req, res) {
     if (!deployUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(deployUser.plan)) return json(res, { error: 'Deploy requires a paid plan. Upgrade to deploy your clones.' }, 403);
     let body; try { body = await readJsonBody(req); } catch { return json(res, { error: 'Bad request' }, 400); }
-    const { outDir, netlifyToken } = body;
+    const { outDir: rawOutDir, netlifyToken } = body;
     if (!netlifyToken) return json(res, { error: 'Netlify personal access token is required' }, 400);
-    if (!isInsideOutputDir(outDir)) return json(res, { error: 'Invalid output folder' }, 400);
+    const outDir = resolveCloneOutDir(rawOutDir);
+    if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(deployUser, outDir)) return json(res, { error: 'Not found' }, 404);
 
     const deployTmp = join(OUTPUT_DIR, `__deploy_${randomUUID().slice(0,8)}`);

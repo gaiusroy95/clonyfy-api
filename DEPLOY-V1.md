@@ -17,6 +17,17 @@
 
 After deploy, a small clone (about 10 pages or fewer) should finish in about **2-5 minutes**.
 
+### Durable clone storage (important)
+
+Clones must land in **Supabase Storage** (`clone-files` bucket). Render disk is ephemeral — after a restart, only Storage-backed clones stay previewable.
+
+The Backend now:
+- Uploads critical HTML during / after the crawl (and mid-clone on hosted)
+- Refuses to mark a clone **Complete** unless Storage verify passes
+- Remaps `outDir` by folder name if the absolute path changed after redeploy
+
+Confirm in Supabase that the `clone-files` bucket exists and the service role can upload. Check Render logs for `[clone storage]`.
+
 ### Keep-warm (free tier cold starts)
 
 Render free web services sleep after idle. The Frontend already:
