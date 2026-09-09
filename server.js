@@ -196,17 +196,25 @@ const IS_SERVERLESS = process.env.CLONYFY_SERVERLESS === '1' || process.env.CLON
 const IS_HOSTED = IS_RENDER
   || process.env.CLONYFY_HOSTED === '1'
   || process.env.NODE_ENV === 'production';
+/**
+ * Low-memory / Free-tier mode: prefer concurrency 1 and softer exports.
+ * Auto-on for Render unless CLONYFY_LOW_MEMORY=0.
+ */
+const IS_LOW_MEMORY = process.env.CLONYFY_LOW_MEMORY === '1'
+  || process.env.CLONYFY_LOW_MEMORY === 'true'
+  || (IS_RENDER && process.env.CLONYFY_LOW_MEMORY !== '0' && process.env.CLONYFY_LOW_MEMORY !== 'false');
 /** Inline clone only for serverless (no child process). Render/dedicated hosts spawn the CLI so /api/clone returns immediately and the UI can poll. */
 const USE_INLINE_CLONE = IS_SERVERLESS || process.env.CLONYFY_INLINE_CLONE === '1';
-/** Parallel page capture on hosted (1–4). Local default stays 1 for lighter machines. */
+/** Parallel page capture (1–4). Hosted Free defaults to 1 to avoid OOM during Chromium crawl. */
 const CLONE_CONCURRENCY = Math.max(1, Math.min(4, parseInt(
-  process.env.CLONYFY_CLONE_CONCURRENCY || (IS_HOSTED ? '2' : '1'),
+  process.env.CLONYFY_CLONE_CONCURRENCY || (IS_HOSTED ? (IS_LOW_MEMORY ? '1' : '2') : '1'),
   10,
-) || (IS_HOSTED ? 2 : 1)));
+) || (IS_HOSTED && !IS_LOW_MEMORY ? 2 : 1)));
 /** Wall-clock limit so jobs cannot spin 60+ minutes with no usable result. */
 const CLONE_DEADLINE_MS = Math.max(
   5 * 60 * 1000,
-  parseInt(process.env.CLONYFY_CLONE_DEADLINE_MS || String(18 * 60 * 1000), 10) || (18 * 60 * 1000),
+  parseInt(process.env.CLONYFY_CLONE_DEADLINE_MS || String((IS_LOW_MEMORY ? 12 : 18) * 60 * 1000), 10)
+    || ((IS_LOW_MEMORY ? 12 : 18) * 60 * 1000),
 );
 const SERVERLESS_MAX_PAGES = Math.max(1, parseInt(process.env.CLONYFY_SERVERLESS_MAX_PAGES || '500', 10) || 500);
 /** Safety ceiling for Scale "Select all pages" (same-origin deep crawl). Raise on dedicated hosts. */
@@ -2754,9 +2762,16 @@ async function buildOutputZip(outDir) {
     if (!cloneOutputHasPages(materialized.dir)) {
       throw new Error('Clone has no captured pages to export. Open Run Preview first.');
     }
-    // Always rebuild app/ from manifest + captured HTML so exports match preview
-    // patches (visibility, script neutralize, replay) and never ship stale scaffolding.
-    await regenerateCloneProject(materialized.dir);
+    // Rebuild Next scaffolding when possible; on low-memory Free hosts this can OOM —
+    // fall back to zipping captured HTML so export still succeeds.
+    try {
+      await regenerateCloneProject(materialized.dir);
+    } catch (regenErr) {
+      console.warn(`[export-zip] regenerateCloneProject failed, exporting captured pages only: ${regenErr?.message || regenErr}`);
+      if (!cloneOutputHasPages(materialized.dir)) {
+        throw new Error('Export regeneration failed and no captured pages remain. Re-run the clone, then export again.');
+      }
+    }
     if (!cloneOutputHasPages(materialized.dir)) {
       throw new Error('Export regeneration cleared page HTML. Re-run the clone, then export again.');
     }
@@ -3368,7 +3383,19 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && (url.pathname === '/api/health' || url.pathname === '/health')) {
-    return json(res, { ok: true, service: 'clonyfy-backend' });
+    const mem = process.memoryUsage();
+    return json(res, {
+      ok: true,
+      service: 'clonyfy-backend',
+      uptimeSec: Math.round(process.uptime()),
+      hosted: IS_HOSTED,
+      lowMemory: IS_LOW_MEMORY,
+      cloneConcurrency: CLONE_CONCURRENCY,
+      memory: {
+        rssMb: Math.round(mem.rss / 1024 / 1024),
+        heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
+      },
+    });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/auth/captcha-config') {
@@ -4111,6 +4138,9 @@ async function handleRequest(req, res) {
       const message = err?.message || 'ZIP export failed';
       if (/paid plan|Upgrade/i.test(message)) return json(res, { error: message }, 403);
       if (/no captured pages|No clone|missing/i.test(message)) return json(res, { error: message }, 404);
+      if (/heap|ENOMEM|out of memory|killed/i.test(message)) {
+        return json(res, { error: 'ZIP export ran out of memory. Re-try once, or upgrade Backend RAM.' }, 500);
+      }
       return json(res, { error: message }, 500);
     }
   }
@@ -4151,7 +4181,13 @@ async function handleRequest(req, res) {
       const stream = createReadStream(zipPath);
       stream.pipe(res);
       stream.on('close', () => { try { rmSync(zipPath); } catch {} });
-    } catch(err) { return json(res, { error: err.message }, 500); }
+    } catch(err) {
+      const message = err?.message || 'ZIP download failed';
+      if (/heap|ENOMEM|out of memory|killed/i.test(message)) {
+        return json(res, { error: 'ZIP export ran out of memory. Re-try once, or upgrade Backend RAM.' }, 500);
+      }
+      return json(res, { error: message }, 500);
+    }
     return;
   }
 
@@ -4180,7 +4216,13 @@ async function handleRequest(req, res) {
       });
       res.end(svg);
     } catch (err) {
-      return json(res, { error: err.message || 'Figma export failed' }, 500);
+      const msg = String(err?.message || err || 'Figma export failed');
+      const oom = /heap|ENOMEM|out of memory|killed|ENOSPC/i.test(msg);
+      return json(res, {
+        error: oom
+          ? 'Figma export ran out of memory on this host. Try a smaller page or upgrade Backend RAM.'
+          : (msg || 'Figma export failed'),
+      }, 500);
     }
     return;
   }
@@ -4215,7 +4257,13 @@ async function handleRequest(req, res) {
       audit(figmaUser.id, figmaUser.name, 'figma_scene', `outDir=${outDir || ''} route=${sceneRoute}`, ip);
       return respondWithFigmaScene(res, scene, figmaUser);
     } catch (err) {
-      return json(res, { error: err.message || 'Figma scene export failed' }, 500);
+      const msg = String(err?.message || err || 'Figma scene export failed');
+      const oom = /heap|ENOMEM|out of memory|killed|ENOSPC/i.test(msg);
+      return json(res, {
+        error: oom
+          ? 'Figma Desktop export ran out of memory on this host. Try a smaller page or upgrade Backend RAM.'
+          : (msg || 'Figma scene export failed'),
+      }, 500);
     }
   }
 
@@ -4245,7 +4293,13 @@ async function handleRequest(req, res) {
       audit(figmaUser.id, figmaUser.name, 'figma_scene', `outDir=${outDir} route=${route}`, ip);
       return respondWithFigmaScene(res, scene, figmaUser);
     } catch (err) {
-      return json(res, { error: err.message || 'Figma scene export failed' }, 500);
+      const msg = String(err?.message || err || 'Figma scene export failed');
+      const oom = /heap|ENOMEM|out of memory|killed|ENOSPC/i.test(msg);
+      return json(res, {
+        error: oom
+          ? 'Figma Desktop export ran out of memory on this host. Try a smaller page or upgrade Backend RAM.'
+          : (msg || 'Figma scene export failed'),
+      }, 500);
     }
   }
 
@@ -4279,7 +4333,13 @@ async function handleRequest(req, res) {
       });
       res.end(svg);
     } catch (err) {
-      return json(res, { error: err.message || 'Figma export failed' }, 500);
+      const msg = String(err?.message || err || 'Figma export failed');
+      const oom = /heap|ENOMEM|out of memory|killed|ENOSPC/i.test(msg);
+      return json(res, {
+        error: oom
+          ? 'Figma export ran out of memory on this host. Try Export for Figma Desktop on a single page, or upgrade Backend RAM.'
+          : (msg || 'Figma export failed'),
+      }, 500);
     }
     return;
   }
@@ -4295,7 +4355,9 @@ async function handleRequest(req, res) {
     try {
       const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
       if (!map) return json(res, { error: 'No pages found' }, 404);
-      const routes = Object.keys(map);
+      const allRoutes = Object.keys(map);
+      const routeCap = IS_LOW_MEMORY ? 8 : (IS_SERVERLESS ? 12 : 80);
+      const routes = allRoutes.slice(0, routeCap);
       const zipName = `${outDir.split(/[\\/]/).pop() || 'clone'}-figma.zip`;
       const zipPath = join(tmpdir(), `clonyfy-figma-${randomUUID()}.zip`);
       await exportCloneToFigmaZip({
@@ -4324,7 +4386,13 @@ async function handleRequest(req, res) {
       stream.pipe(res);
       stream.on('close', () => { try { rmSync(zipPath); } catch {} });
     } catch (err) {
-      return json(res, { error: err.message || 'Figma export failed' }, 500);
+      const msg = String(err?.message || err || 'Figma export failed');
+      const oom = /heap|ENOMEM|out of memory|killed|ENOSPC/i.test(msg);
+      return json(res, {
+        error: oom
+          ? 'Figma ZIP export ran out of memory. Export fewer pages (single-page SVG) or upgrade Backend RAM.'
+          : (msg || 'Figma export failed'),
+      }, 500);
     }
     return;
   }
@@ -4392,7 +4460,11 @@ async function handleRequest(req, res) {
       if (!/^[A-Za-z0-9._/-]+$/.test(cleanBranch) || cleanBranch.includes('..')) return json(res, { error: 'Invalid branch name' }, 400);
       const materialized = await materializeCloneOutput(outDir);
       try {
-        await regenerateCloneProject(materialized.dir);
+        try {
+          await regenerateCloneProject(materialized.dir);
+        } catch (regenErr) {
+          console.warn(`[github/push] regenerateCloneProject failed, pushing captured output: ${regenErr?.message || regenErr}`);
+        }
         const prefix = cleanGitPath(targetPath);
         const files = listOutputFiles(materialized.dir);
         if (!files.length) return json(res, { error: 'No files found in output folder' }, 400);
@@ -4800,6 +4872,7 @@ async function handleRequest(req, res) {
       affiliate_program_url: s.affiliate_program_url || 'https://affonso.io/',
       affiliate_public_id: enabled ? (s.affiliate_public_id || DEFAULT_AFFONSO_PUBLIC_ID) : '',
       affiliate_dashboard_enabled: enabled && !!(s.affiliate_api_key && s.affiliate_program_id),
+      figma_community_plugin_url: String(process.env.FIGMA_COMMUNITY_PLUGIN_URL || '').trim(),
     });
   }
 
@@ -5976,13 +6049,21 @@ async function handler(req, res) {
   }
 }
 
+process.on('warning', (w) => {
+  if (w?.name === 'MaxListenersExceededWarning') return;
+  console.warn(`[process] ${w?.name || 'Warning'}: ${w?.message || w}`);
+});
+
 ensureInit().then(() => {
   // Bind all interfaces so Render/proxy health checks can reach the process.
   createServer(handler).listen(PORT, '0.0.0.0', () => {
     const publicUrl = DEFAULT_APP_URL || `http://localhost:${PORT}`;
     console.log(`\nCLONYFY API listening on 0.0.0.0:${PORT}`);
     console.log(`Public URL: ${publicUrl}`);
-    console.log(`Frontend CORS: ${process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '(not set)'}\n`);
+    console.log(`Frontend CORS: ${process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '(not set)'}`);
+    console.log(
+      `Hosted=${IS_HOSTED} lowMemory=${IS_LOW_MEMORY} cloneConcurrency=${CLONE_CONCURRENCY} deadlineMs=${CLONE_DEADLINE_MS}\n`,
+    );
   });
 });
 

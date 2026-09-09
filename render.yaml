@@ -19,8 +19,11 @@ services:
         value: "1"
       - key: CLONYFY_FAST_CLONE
         value: "1"
+      # Free/Starter: concurrency 1 avoids Chromium OOM. Raise to 2+ on more RAM.
       - key: CLONYFY_CLONE_CONCURRENCY
-        value: "2"
+        value: "1"
+      - key: CLONYFY_LOW_MEMORY
+        value: "1"
       # Optional: mount a persistent disk and set CLONYFY_OUTPUT_DIR to that path.
       # - key: CLONYFY_OUTPUT_DIR
       #   value: /var/data/output
