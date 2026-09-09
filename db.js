@@ -607,30 +607,39 @@ export async function getContactSubmissions(limit = 100) {
 }
 
 const CLONE_FILES_BUCKET = 'clone-files';
+/** Free-tier safe default (~50MB). Pro can raise in the Supabase dashboard. */
+const CLONE_FILES_MAX_BYTES = Math.max(
+  1 * 1024 * 1024,
+  parseInt(process.env.CLONYFY_STORAGE_MAX_BYTES || String(50 * 1024 * 1024), 10) || (50 * 1024 * 1024),
+);
 let _cloneBucketReady = false;
 
 async function ensureCloneFilesBucket() {
   if (_cloneBucketReady) return;
   const { error } = await supabase.storage.createBucket(CLONE_FILES_BUCKET, {
     public: false,
-    fileSizeLimit: 524288000, // 500MB — Pro global limit; Free still caps ~50MB globally
+    fileSizeLimit: CLONE_FILES_MAX_BYTES,
   });
   if (error && !/already exists|already owned|duplicate|resource already exists/i.test(error.message || '')) {
     throw new Error(error.message);
   }
   const { error: updateErr } = await supabase.storage.updateBucket(CLONE_FILES_BUCKET, {
     public: false,
-    fileSizeLimit: 524288000,
+    fileSizeLimit: CLONE_FILES_MAX_BYTES,
   });
-  if (updateErr) console.warn('[clone-files bucket] could not raise fileSizeLimit:', updateErr.message);
+  if (updateErr) console.warn('[clone-files bucket] could not set fileSizeLimit:', updateErr.message);
   _cloneBucketReady = true;
 }
 
 export async function uploadCloneFile(path, bytes, contentType = 'application/octet-stream') {
   await ensureCloneFilesBucket();
+  const body = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  if (body.length > CLONE_FILES_MAX_BYTES) {
+    throw new Error(`The object exceeded the maximum allowed size (${body.length} > ${CLONE_FILES_MAX_BYTES})`);
+  }
   const { error } = await supabase.storage
     .from(CLONE_FILES_BUCKET)
-    .upload(path, bytes, { contentType, upsert: true });
+    .upload(path, body, { contentType, upsert: true });
   if (error) throw new Error(error.message);
 }
 

@@ -1356,8 +1356,7 @@ async function persistCloneOutput(outDir, options = {}) {
       if (slimmed && slimmed.length <= maxObjectBytes) {
         data = slimmed;
         console.warn(`[clone storage] slimmed oversized manifest.json ${size} → ${data.length} bytes`);
-      } else if (slimmed && slimmed.length > maxObjectBytes) {
-        // Last resort: drop asset lists too so storage persist can finish.
+      } else if (slimmed) {
         data = Buffer.from(JSON.stringify({
           targetOrigin: '',
           capturedAt: new Date().toISOString(),
@@ -1367,10 +1366,31 @@ async function persistCloneOutput(outDir, options = {}) {
         console.warn(`[clone storage] replaced oversized manifest.json with stub (${size} bytes original)`);
       }
     }
+    // Tiny JSON metadata: prefer DB text store first (avoids Free-tier Storage size quirks).
+    if (isRouteMap && data.length <= 900_000) {
+      try {
+        await saveCloneTextFile(storagePath, data.toString('utf8'));
+        // Also mirror under legacy prefix for older readers.
+        const legacyPath = `${legacyCloneStoragePrefix(outDir)}/route-map.json`;
+        if (legacyPath !== storagePath) {
+          await saveCloneTextFile(legacyPath, data.toString('utf8')).catch(() => {});
+        }
+        fallbackSaved++;
+        uploaded++;
+      } catch (textErr) {
+        failures.push(`${file.rel}: ${textErr?.message || textErr}`);
+      }
+      // Best-effort Storage copy; never fail the clone if text save succeeded.
+      try {
+        if (data.length <= maxObjectBytes) {
+          await uploadCloneFileWithRetry(storagePath, data, contentTypeForPath(file.rel), 3);
+        }
+      } catch {}
+      return;
+    }
     if (data.length > maxObjectBytes) {
       if (isManifest) {
         skipped++;
-        failures.push(`${file.rel}: skipped (still over storage size cap after slim)`);
         return;
       }
       failures.push(`${file.rel}: exceeds storage size cap (${data.length} bytes)`);
@@ -1380,21 +1400,25 @@ async function persistCloneOutput(outDir, options = {}) {
       await uploadCloneFileWithRetry(storagePath, data, contentTypeForPath(file.rel), isRequiredCritical ? 6 : 4);
       uploaded++;
     } catch (err) {
-      failures.push(`${file.rel}: ${err?.message || err}`);
-      if (isRequiredCritical) {
-        const asText = data.toString('utf8');
-        if (asText.length <= 900_000) {
-          try {
-            await saveCloneTextFile(storagePath, asText);
-            fallbackSaved++;
-            uploaded++;
-            return;
-          } catch (fallbackErr) {
-            failures.push(`${file.rel} fallback: ${fallbackErr?.message || fallbackErr}`);
-          }
+      const msg = String(err?.message || err);
+      if (isManifest) {
+        console.warn(`[clone storage] optional ${file.rel} skipped: ${msg}`);
+        return;
+      }
+      if (isRequiredCritical && data.length <= 900_000) {
+        try {
+          await saveCloneTextFile(storagePath, data.toString('utf8'));
+          fallbackSaved++;
+          uploaded++;
+          console.warn(`[clone storage] ${file.rel} saved via text fallback after: ${msg}`);
+          return;
+        } catch (fallbackErr) {
+          failures.push(`${file.rel}: ${msg}`);
+          failures.push(`${file.rel} fallback: ${fallbackErr?.message || fallbackErr}`);
+          return;
         }
       }
-      // Manifest failures are non-fatal — preview works from route-map + HTML.
+      failures.push(`${file.rel}: ${msg}`);
     }
   };
   const runLimited = async (items, limit = 8) => {
