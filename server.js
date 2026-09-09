@@ -3026,9 +3026,12 @@ function githubAPIRequest(method, path, token, body = null) {
         if (r.statusCode >= 200 && r.statusCode < 300) {
           resolvePromise({ status: r.statusCode, body: parsed });
         } else {
-          const err = new Error(parsed.message || `GitHub API HTTP ${r.statusCode}`);
+          const detail = parsed.message || `GitHub API HTTP ${r.statusCode}`;
+          const err = new Error(detail);
           err.statusCode = r.statusCode;
           err.github = parsed;
+          err.githubMethod = method;
+          err.githubPath = path;
           reject(err);
         }
       });
@@ -3178,11 +3181,14 @@ function isGitHubEmptyRepoError(err) {
 
 function friendlyGitHubError(err) {
   const msg = String(err?.message || err || 'GitHub request failed');
+  const status = Number(err?.statusCode) || 0;
+  const ghPath = String(err?.githubPath || '');
+  // Clone/storage errors often contain "not found" — check before GitHub repo messaging.
+  if (/Output folder not found|could not be loaded|Clone pages could not be loaded|Invalid output folder/i.test(msg)) {
+    return 'Clone files are missing from storage. Re-run the clone, then push again.';
+  }
   if (/bad credentials|requires authentication|unauthorized/i.test(msg)) {
     return 'GitHub rejected the token. Create a PAT with repo scope (classic) or Contents: Read and write (fine-grained).';
-  }
-  if (/not found/i.test(msg) && !isGitHubEmptyRepoError(err)) {
-    return 'GitHub repository not found (or this token cannot access it). Create the empty repo on GitHub first, or check owner/repo spelling and PAT access.';
   }
   if (isGitHubEmptyRepoError(err)) {
     return 'Could not initialize the empty GitHub repo. Open the repo on GitHub, add a README (commit), then push again — or recreate the repo with “Add a README” checked.';
@@ -3190,10 +3196,20 @@ function friendlyGitHubError(err) {
   if (/rate limit/i.test(msg)) {
     return 'GitHub API rate limit hit. Wait a minute and try again.';
   }
-  if (/Output folder not found|could not be loaded/i.test(msg)) {
-    return 'Clone files are missing from storage. Re-run the clone, then push again.';
+  if (/sha wasn.?t supplied|already exists/i.test(msg)) {
+    return 'GitHub repo already has commits — retry push (initialization step is not needed).';
   }
-  return msg;
+  // Only blame "repo missing" when the failing call was GET/POST /repos/:owner/:repo itself.
+  const isRepoLookup = /\/repos\/[^/]+\/[^/]+\/?(\?|$)/.test(ghPath) || /\/user\/repos\/?$/.test(ghPath);
+  if ((status === 404 || /not found/i.test(msg)) && isRepoLookup) {
+    return 'GitHub repository not found (or this token cannot access it). Create the empty repo on GitHub first, or check owner/repo spelling and PAT access.';
+  }
+  if (status === 404 || /not found/i.test(msg)) {
+    const where = ghPath ? ` (${err.githubMethod || 'GET'} ${ghPath})` : '';
+    return `GitHub API returned Not Found${where}. The repo is reachable, but this push step failed — try again; if it keeps failing, re-run the clone then push.`;
+  }
+  const ghErrors = Array.isArray(err?.github?.errors) ? err.github.errors.map((e) => e.message || e.code).filter(Boolean).join('; ') : '';
+  return ghErrors ? `${msg} (${ghErrors})` : msg;
 }
 
 async function ensureGitHubRepo(token, owner, repoName) {
@@ -3220,12 +3236,13 @@ async function ensureGitHubRepo(token, owner, repoName) {
   }
 }
 
-/** True when the repo has no commits / refs yet (manual empty create, no README). */
+/**
+ * True when the repo has never been pushed to (manual empty create, no README).
+ * Do NOT use `size === 0` alone — GitHub often leaves size at 0 after the first commits.
+ */
 function isGitHubRepoEmpty(repoInfo) {
   const body = repoInfo?.body || repoInfo || {};
-  if (body.size === 0) return true;
-  if (body.pushed_at == null && body.size === 0) return true;
-  return false;
+  return body.pushed_at == null;
 }
 
 /**
@@ -3238,6 +3255,23 @@ async function bootstrapEmptyGitHubRepo(token, owner, repoName, branch) {
     'utf8',
   ).toString('base64');
   const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/contents/.clonyfy-init.md`;
+  // Already initialized (e.g. prior push or README) — nothing to do.
+  try {
+    await githubAPIRequest('GET', `${path}?ref=${encodeURIComponent(branch)}`, token);
+    return;
+  } catch (probeErr) {
+    if (!/not found/i.test(String(probeErr?.message || '')) && Number(probeErr?.statusCode) !== 404) {
+      // Repo may still be empty (409) — continue to create.
+      if (!isGitHubEmptyRepoError(probeErr)) {
+        try {
+          await githubAPIRequest('GET', path, token);
+          return;
+        } catch {
+          /* create below */
+        }
+      }
+    }
+  }
   const payload = {
     message: 'Initialize repository for Clonyfy',
     content,
@@ -3246,11 +3280,15 @@ async function bootstrapEmptyGitHubRepo(token, owner, repoName, branch) {
   try {
     await githubAPIRequest('PUT', path, token, { ...payload, branch });
   } catch (err) {
-    if (isGitHubEmptyRepoError(err) || /branch .* not found|invalid request|not found/i.test(String(err?.message || ''))) {
-      await githubAPIRequest('PUT', path, token, payload);
-    } else if (/already exists|sha wasn.?t supplied/i.test(String(err?.message || ''))) {
-      // Already initialized.
-      return;
+    const m = String(err?.message || '');
+    if (/already exists|sha wasn.?t supplied/i.test(m)) return;
+    if (isGitHubEmptyRepoError(err) || /branch .* not found/i.test(m) || Number(err?.statusCode) === 404) {
+      try {
+        await githubAPIRequest('PUT', path, token, payload);
+      } catch (err2) {
+        if (/already exists|sha wasn.?t supplied/i.test(String(err2?.message || ''))) return;
+        throw err2;
+      }
     } else {
       throw err;
     }
@@ -3291,11 +3329,27 @@ async function githubUploadBlobsLimited(files, owner, repoName, token, prefix, c
       const file = files[i];
       const gitPath = prefix ? `${prefix}/${file.rel}` : file.rel;
       nextPaths.add(gitPath);
-      const blob = await githubAPIRequest('POST', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/blobs`, token, {
-        content: readFileSync(file.abs).toString('base64'),
-        encoding: 'base64',
-      });
-      entries[i] = { path: gitPath, mode: '100644', type: 'blob', sha: blob.body.sha };
+      let lastErr;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const blob = await githubAPIRequest('POST', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/blobs`, token, {
+            content: readFileSync(file.abs).toString('base64'),
+            encoding: 'base64',
+          });
+          entries[i] = { path: gitPath, mode: '100644', type: 'blob', sha: blob.body.sha };
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          const status = Number(err?.statusCode) || 0;
+          if (status === 401 || status === 403 || status === 422) throw err;
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        }
+      }
+      if (lastErr) {
+        lastErr.message = `Failed uploading ${gitPath}: ${lastErr.message}`;
+        throw lastErr;
+      }
     }
   });
   await Promise.all(workers);
@@ -4925,7 +4979,12 @@ async function handleRequest(req, res) {
       try {
         materialized = await materializeCloneOutput(outDir);
       } catch (matErr) {
-        return json(res, { error: friendlyGitHubError(matErr) }, 404);
+        const matMsg = String(matErr?.message || matErr || '');
+        console.warn(`[github/push] materialize failed for ${outDir}: ${matMsg}`);
+        if (/Output folder not found|could not be loaded|Clone pages could not be loaded|Invalid output folder/i.test(matMsg)) {
+          return json(res, { error: 'Clone files are missing from storage. Re-run the clone, then push again.' }, 404);
+        }
+        return json(res, { error: matMsg || 'Could not load clone files for GitHub push.' }, 404);
       }
       try {
         // Hosted Free: skip Next.js regen (slow/OOM). Push captured HTML + assets instead.
@@ -4937,7 +4996,12 @@ async function handleRequest(req, res) {
           }
         }
         const prefix = cleanGitPath(targetPath);
-        const files = listOutputFiles(materialized.dir);
+        const files = listOutputFiles(materialized.dir).filter((f) => {
+          // GitHub rejects some path shapes; skip junk that breaks the whole commit.
+          if (!f.rel || /[\x00-\x1f]/.test(f.rel)) return false;
+          if (f.rel.includes('.git/') || f.rel === '.git') return false;
+          return true;
+        });
         if (!files.length) return json(res, { error: 'No files found in output folder. Re-run the clone, then push again.' }, 400);
         if (files.length > 5000) return json(res, { error: `Too many files for one GitHub commit (${files.length}/5000). Try a smaller clone.` }, 400);
         const tooLarge = files.find(f => f.size > 95 * 1024 * 1024);
@@ -4947,19 +5011,19 @@ async function handleRequest(req, res) {
         let baseCommitSha = null;
         let baseTreeSha = null;
 
-        // Manual empty repos (no README) cannot read refs — initialize first via Contents API.
+        // Only bootstrap when GitHub says the repo is empty (409) — never trust size===0.
         let emptyLikely = isGitHubRepoEmpty(repoInfo);
-        if (!emptyLikely) {
-          try {
-            await githubAPIRequest('GET', refPath, token);
-          } catch (probeErr) {
-            if (isGitHubEmptyRepoError(probeErr)) emptyLikely = true;
-          }
+        try {
+          await githubAPIRequest('GET', refPath, token);
+          emptyLikely = false;
+        } catch (probeErr) {
+          if (isGitHubEmptyRepoError(probeErr)) emptyLikely = true;
+          else if (isGitHubRepoEmpty(repoInfo) && Number(probeErr?.statusCode) === 404) emptyLikely = true;
+          else emptyLikely = false;
         }
         if (emptyLikely) {
           console.log(`[github/push] bootstrapping empty repo ${owner}/${repoName} branch=${cleanBranch}`);
           await bootstrapEmptyGitHubRepo(token, owner, repoName, cleanBranch);
-          // Refresh repo metadata after init.
           try {
             repoInfo = await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`, token);
           } catch {}
@@ -5017,58 +5081,78 @@ async function handleRequest(req, res) {
           throw new Error('Could not resolve a GitHub branch after initializing the repository.');
         }
 
-        const baseCommit = await githubAPIRequest(
+        let baseCommit = await githubAPIRequest(
           'GET',
           `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/commits/${baseCommitSha}`,
           token,
         );
         baseTreeSha = baseCommit.body.tree.sha;
 
-        const { entries, nextPaths } = await githubUploadBlobsLimited(
-          files,
-          owner,
-          repoName,
-          token,
-          prefix,
-          IS_HOSTED ? 3 : 6,
-        );
+        const message = String(commitMessage || '').trim() || `Import CLONYFY output (${outDir.split(/[\\/]/).pop()})`;
+        // Hosted: smaller batches avoid request-body / timeout failures on large clones (e.g. Shopify).
+        const batchSize = IS_HOSTED || IS_LOW_MEMORY ? 250 : 500;
+        let commit = null;
+        const allNextPaths = new Set();
 
-        if (cleanTarget && baseTreeSha) {
-          const tree = await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/trees/${baseTreeSha}?recursive=1`, token);
-          for (const item of tree.body.tree || []) {
-            if (item.type !== 'blob') continue;
-            const inTarget = prefix ? item.path === prefix || item.path.startsWith(`${prefix}/`) : true;
-            if (inTarget && !nextPaths.has(item.path)) {
-              entries.push({ path: item.path, mode: '100644', type: 'blob', sha: null });
+        for (let offset = 0; offset < files.length; offset += batchSize) {
+          const batch = files.slice(offset, offset + batchSize);
+          const batchNo = Math.floor(offset / batchSize) + 1;
+          const batchCount = Math.ceil(files.length / batchSize);
+          console.log(`[github/push] ${owner}/${repoName} uploading batch ${batchNo}/${batchCount} (${batch.length} files)`);
+
+          const { entries, nextPaths } = await githubUploadBlobsLimited(
+            batch,
+            owner,
+            repoName,
+            token,
+            prefix,
+            IS_HOSTED ? 2 : 6,
+          );
+          for (const p of nextPaths) allNextPaths.add(p);
+
+          const isLast = offset + batchSize >= files.length;
+          if (isLast && cleanTarget && baseTreeSha) {
+            const tree = await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/trees/${baseTreeSha}?recursive=1`, token);
+            for (const item of tree.body.tree || []) {
+              if (item.type !== 'blob') continue;
+              const inTarget = prefix ? item.path === prefix || item.path.startsWith(`${prefix}/`) : true;
+              if (inTarget && !allNextPaths.has(item.path)) {
+                entries.push({ path: item.path, mode: '100644', type: 'blob', sha: null });
+              }
             }
           }
+
+          const newTree = await githubAPIRequest(
+            'POST',
+            `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/trees`,
+            token,
+            { base_tree: baseTreeSha, tree: entries },
+          );
+          const batchMessage = batchCount > 1
+            ? `${message} (${batchNo}/${batchCount})`
+            : message;
+          commit = await githubAPIRequest(
+            'POST',
+            `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/commits`,
+            token,
+            {
+              message: batchMessage,
+              tree: newTree.body.sha,
+              parents: [baseCommitSha],
+            },
+          );
+          await githubAPIRequest('PATCH', refPath, token, { sha: commit.body.sha, force: false });
+          baseCommitSha = commit.body.sha;
+          baseTreeSha = newTree.body.sha;
         }
 
-        const newTree = await githubAPIRequest(
-          'POST',
-          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/trees`,
-          token,
-          { base_tree: baseTreeSha, tree: entries },
-        );
-        const message = String(commitMessage || '').trim() || `Import CLONYFY output (${outDir.split(/[\\/]/).pop()})`;
-        const commit = await githubAPIRequest(
-          'POST',
-          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/commits`,
-          token,
-          {
-            message,
-            tree: newTree.body.sha,
-            parents: [baseCommitSha],
-          },
-        );
-        await githubAPIRequest('PATCH', refPath, token, { sha: commit.body.sha, force: false });
         audit(ghUser.id, ghUser.name, 'github_push', `repo=${owner}/${repoName} files=${files.length}`, ip);
         return json(res, {
           ok: true,
           files: files.length,
           branch: cleanBranch,
           targetPath: prefix,
-          commitUrl: commit.body.html_url,
+          commitUrl: commit?.body?.html_url,
           repoUrl: repoInfo.body.html_url,
           emptyRepoBootstrapped: !!emptyLikely,
           createdRepo: !!(createRepo && repoInfo.body?.created_at && Date.now() - Date.parse(repoInfo.body.created_at) < 60_000),
@@ -5077,6 +5161,11 @@ async function handleRequest(req, res) {
         materialized.cleanup();
       }
     } catch(err) {
+      console.error(
+        `[github/push] failed: ${err?.message || err}` +
+          (err?.githubPath ? ` [${err.githubMethod || ''} ${err.githubPath}]` : '') +
+          (err?.statusCode ? ` status=${err.statusCode}` : ''),
+      );
       return json(res, { error: friendlyGitHubError(err) }, githubErrorStatus(err));
     }
   }
