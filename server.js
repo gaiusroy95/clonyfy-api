@@ -3159,10 +3159,73 @@ function listOutputFiles(outDir) {
 
 function githubErrorStatus(err) {
   const msg = String(err?.message || '');
-  if (/bad credentials|requires authentication/i.test(msg)) return 401;
+  if (/bad credentials|requires authentication|unauthorized/i.test(msg)) return 401;
   if (/not found/i.test(msg)) return 404;
-  if (/validation failed|invalid/i.test(msg)) return 400;
+  if (/validation failed|invalid|name already exists/i.test(msg)) return 400;
+  if (/rate limit/i.test(msg)) return 429;
   return 502;
+}
+
+function friendlyGitHubError(err) {
+  const msg = String(err?.message || err || 'GitHub request failed');
+  if (/bad credentials|requires authentication|unauthorized/i.test(msg)) {
+    return 'GitHub rejected the token. Create a PAT with repo scope (classic) or Contents: Read and write (fine-grained).';
+  }
+  if (/not found/i.test(msg)) {
+    return 'GitHub repository not found (or this token cannot access it). Create the empty repo on GitHub first, or check owner/repo spelling and PAT access.';
+  }
+  if (/rate limit/i.test(msg)) {
+    return 'GitHub API rate limit hit. Wait a minute and try again.';
+  }
+  if (/Output folder not found|could not be loaded/i.test(msg)) {
+    return 'Clone files are missing from storage. Re-run the clone, then push again.';
+  }
+  return msg;
+}
+
+async function ensureGitHubRepo(token, owner, repoName) {
+  try {
+    return await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`, token);
+  } catch (err) {
+    const msg = String(err?.message || '');
+    if (!/not found/i.test(msg)) throw err;
+    // Create an empty public repo under the authenticated user when possible.
+    const me = await githubAPIRequest('GET', '/user', token);
+    const login = String(me.body?.login || '').toLowerCase();
+    if (!login || login !== String(owner).toLowerCase()) {
+      throw new Error(
+        `Repository ${owner}/${repoName} was not found. Create it on GitHub first (this token can only auto-create repos under ${me.body?.login || 'your user'}).`,
+      );
+    }
+    const created = await githubAPIRequest('POST', '/user/repos', token, {
+      name: repoName,
+      private: false,
+      auto_init: true,
+      description: 'Imported from Clonyfy',
+    });
+    return created;
+  }
+}
+
+async function githubUploadBlobsLimited(files, owner, repoName, token, prefix, concurrency = 4) {
+  const entries = [];
+  const nextPaths = new Set();
+  let index = 0;
+  const workers = Array.from({ length: Math.min(concurrency, Math.max(1, files.length)) }, async () => {
+    while (index < files.length) {
+      const i = index++;
+      const file = files[i];
+      const gitPath = prefix ? `${prefix}/${file.rel}` : file.rel;
+      nextPaths.add(gitPath);
+      const blob = await githubAPIRequest('POST', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/blobs`, token, {
+        content: readFileSync(file.abs).toString('base64'),
+        encoding: 'base64',
+      });
+      entries[i] = { path: gitPath, mode: '100644', type: 'blob', sha: blob.body.sha };
+    }
+  });
+  await Promise.all(workers);
+  return { entries: entries.filter(Boolean), nextPaths };
 }
 
 // Allowed origins for CORS. The app's own origin is always allowed.
@@ -4723,7 +4786,7 @@ async function handleRequest(req, res) {
         repos,
       });
     } catch(err) {
-      return json(res, { error: err.message }, githubErrorStatus(err));
+      return json(res, { error: friendlyGitHubError(err) }, githubErrorStatus(err));
     }
   }
 
@@ -4743,7 +4806,7 @@ async function handleRequest(req, res) {
         branches: (branches.body || []).map(b => b.name).filter(Boolean),
       });
     } catch(err) {
-      return json(res, { error: err.message }, githubErrorStatus(err));
+      return json(res, { error: friendlyGitHubError(err) }, githubErrorStatus(err));
     }
   }
 
@@ -4752,32 +4815,61 @@ async function handleRequest(req, res) {
     if (!ghUser) return json(res, { error: 'Not authenticated' }, 401);
     if (!isPaidPlan(ghUser.plan)) return json(res, { error: 'GitHub push requires a paid plan. Upgrade to publish your clones.' }, 403);
     try {
-      const { outDir: rawOutDir, token, repo, branch = 'main', targetPath = '', commitMessage = '', cleanTarget = false } = await readJsonBody(req, 200_000);
+      const {
+        outDir: rawOutDir,
+        token,
+        repo,
+        branch = 'main',
+        targetPath = '',
+        commitMessage = '',
+        cleanTarget = false,
+        createRepo = true,
+      } = await readJsonBody(req, 200_000);
       const outDir = resolveCloneOutDir(rawOutDir);
       if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
-      if (!await canUseCloneOutput(ghUser, outDir)) return json(res, { error: 'Not found' }, 404);
+      if (!await canUseCloneOutput(ghUser, outDir)) {
+        return json(res, { error: 'Clone not found for your account (or output path is invalid). Re-open the capture from Library.' }, 404);
+      }
       if (!token || String(token).length < 20) return json(res, { error: 'GitHub token is required' }, 400);
       const parsedRepo = parseGitHubRepo(repo);
       if (!parsedRepo) return json(res, { error: 'Enter a GitHub repo as owner/repo or a github.com URL' }, 400);
       const cleanBranch = String(branch || 'main').trim();
       if (!/^[A-Za-z0-9._/-]+$/.test(cleanBranch) || cleanBranch.includes('..')) return json(res, { error: 'Invalid branch name' }, 400);
-      const materialized = await materializeCloneOutput(outDir);
+
+      const { owner, repo: repoName } = parsedRepo;
+      // Validate / create the GitHub repo BEFORE rematerializing (avoids long wait then "Not Found").
+      let repoInfo;
       try {
-        try {
-          await regenerateCloneProject(materialized.dir);
-        } catch (regenErr) {
-          console.warn(`[github/push] regenerateCloneProject failed, pushing captured output: ${regenErr?.message || regenErr}`);
+        repoInfo = createRepo
+          ? await ensureGitHubRepo(token, owner, repoName)
+          : await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`, token);
+      } catch (ghErr) {
+        return json(res, { error: friendlyGitHubError(ghErr) }, githubErrorStatus(ghErr));
+      }
+
+      let materialized;
+      try {
+        materialized = await materializeCloneOutput(outDir);
+      } catch (matErr) {
+        return json(res, { error: friendlyGitHubError(matErr) }, 404);
+      }
+      try {
+        // Hosted Free: skip Next.js regen (slow/OOM). Push captured HTML + assets instead.
+        if (!(IS_HOSTED || IS_LOW_MEMORY || IS_SERVERLESS)) {
+          try {
+            await regenerateCloneProject(materialized.dir);
+          } catch (regenErr) {
+            console.warn(`[github/push] regenerateCloneProject failed, pushing captured output: ${regenErr?.message || regenErr}`);
+          }
         }
         const prefix = cleanGitPath(targetPath);
         const files = listOutputFiles(materialized.dir);
-        if (!files.length) return json(res, { error: 'No files found in output folder' }, 400);
+        if (!files.length) return json(res, { error: 'No files found in output folder. Re-run the clone, then push again.' }, 400);
         if (files.length > 5000) return json(res, { error: `Too many files for one GitHub commit (${files.length}/5000). Try a smaller clone.` }, 400);
         const tooLarge = files.find(f => f.size > 95 * 1024 * 1024);
         if (tooLarge) return json(res, { error: `File is too large for GitHub API: ${tooLarge.rel}` }, 400);
 
-        const { owner, repo: repoName } = parsedRepo;
         const refPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/ref/heads/${cleanBranch.split('/').map(encodeURIComponent).join('/')}`;
-        const repoInfo = await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}`, token);
         let ref;
         try {
           ref = await githubAPIRequest('GET', refPath, token);
@@ -4794,17 +4886,14 @@ async function handleRequest(req, res) {
         const baseCommitSha = ref.body.object.sha;
         const baseCommit = await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/commits/${baseCommitSha}`, token);
         const baseTreeSha = baseCommit.body.tree.sha;
-        const entries = [];
-        const nextPaths = new Set();
-        for (const file of files) {
-          const gitPath = prefix ? `${prefix}/${file.rel}` : file.rel;
-          nextPaths.add(gitPath);
-          const blob = await githubAPIRequest('POST', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/blobs`, token, {
-            content: readFileSync(file.abs).toString('base64'),
-            encoding: 'base64',
-          });
-          entries.push({ path: gitPath, mode: '100644', type: 'blob', sha: blob.body.sha });
-        }
+        const { entries, nextPaths } = await githubUploadBlobsLimited(
+          files,
+          owner,
+          repoName,
+          token,
+          prefix,
+          IS_HOSTED ? 3 : 6,
+        );
 
         if (cleanTarget) {
           const tree = await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/trees/${baseTreeSha}?recursive=1`, token);
@@ -4828,6 +4917,7 @@ async function handleRequest(req, res) {
           parents: [baseCommitSha],
         });
         await githubAPIRequest('PATCH', refPath, token, { sha: commit.body.sha, force: false });
+        audit(ghUser.id, ghUser.name, 'github_push', `repo=${owner}/${repoName} files=${files.length}`, ip);
         return json(res, {
           ok: true,
           files: files.length,
@@ -4835,12 +4925,13 @@ async function handleRequest(req, res) {
           targetPath: prefix,
           commitUrl: commit.body.html_url,
           repoUrl: repoInfo.body.html_url,
+          createdRepo: !!(createRepo && repoInfo.body?.created_at && Date.now() - Date.parse(repoInfo.body.created_at) < 60_000),
         });
       } finally {
         materialized.cleanup();
       }
     } catch(err) {
-      return json(res, { error: err.message }, githubErrorStatus(err));
+      return json(res, { error: friendlyGitHubError(err) }, githubErrorStatus(err));
     }
   }
 
