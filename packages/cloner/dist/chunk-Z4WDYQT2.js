@@ -12390,13 +12390,16 @@ Total unique assets saved: ${uniqueAssets.size}`);
         url: r.url,
         route: r.route,
         html: "",
+        // Keep asset map for preview rewrite; drop bulky network logs on hosted/fast
+        // so manifest.json stays under Supabase Free storage limits (~50MB).
         assets: r.assets,
-        network: IS_SERVERLESS3 ? [] : r.network,
+        network: IS_SERVERLESS3 || IS_FAST_CLONE2 ? [] : r.network,
         failedAssets: r.failedAssets
       }))
     };
     const manifestPath = join6(opts.out, "manifest.json");
-    writeFileSync5(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    const manifestJson = IS_SERVERLESS3 || IS_FAST_CLONE2 ? JSON.stringify(manifest) : JSON.stringify(manifest, null, 2);
+    writeFileSync5(manifestPath, manifestJson, "utf8");
     await notifyArtifact({ relPath: "manifest.json", absPath: manifestPath, kind: "manifest" });
     if (!SKIP_NEXT_GEN) {
       logger.info("\nGenerating Next.js app...");
@@ -12473,4 +12476,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-4T2PKHCR.js.map
+//# sourceMappingURL=chunk-Z4WDYQT2.js.map

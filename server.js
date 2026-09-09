@@ -1302,27 +1302,86 @@ async function persistCloneOutput(outDir, options = {}) {
   let fallbackSaved = 0;
   const failures = [];
   // Hosted Storage uploads time out on huge binaries — preview only needs HTML + modest assets.
+  // Supabase Free global object cap is ~50MB; stay under that for every object.
   const maxAssetUploadBytes = IS_HOSTED ? 8 * 1024 * 1024 : 50 * 1024 * 1024;
+  const maxObjectBytes = IS_HOSTED ? 45 * 1024 * 1024 : 50 * 1024 * 1024;
+
+  const slimManifestBuffer = (buf) => {
+    try {
+      const parsed = JSON.parse(buf.toString('utf8'));
+      const pages = Array.isArray(parsed?.pages) ? parsed.pages.map((page) => ({
+        url: page?.url || '',
+        route: page?.route || '',
+        html: '',
+        assets: Array.isArray(page?.assets)
+          ? page.assets.map((a) => ({
+            originalUrl: a?.originalUrl || a?.url || '',
+            localPath: a?.localPath || a?.path || '',
+            contentType: a?.contentType || '',
+          })).filter((a) => a.originalUrl || a.localPath)
+          : [],
+        network: [],
+        failedAssets: Array.isArray(page?.failedAssets) ? page.failedAssets.slice(0, 50) : [],
+      })) : [];
+      return Buffer.from(JSON.stringify({
+        targetOrigin: parsed?.targetOrigin || '',
+        capturedAt: parsed?.capturedAt || new Date().toISOString(),
+        pages,
+      }), 'utf8');
+    } catch {
+      return null;
+    }
+  };
+
   const uploadOne = async (file) => {
     const size = statSync(file.abs).size;
-    const isCritical = file.rel === 'route-map.json' || file.rel === 'manifest.json' || file.rel.startsWith('captured-pages/');
+    const isPage = file.rel.startsWith('captured-pages/');
+    const isRouteMap = file.rel === 'route-map.json';
+    const isManifest = file.rel === 'manifest.json';
+    // Pages + route-map are required for preview. Manifest is helpful but optional.
+    const isRequiredCritical = isRouteMap || isPage;
+    const isCritical = isRequiredCritical || isManifest;
     if (size > maxAssetUploadBytes && !isCritical) {
       skipped++;
       return;
     }
-    if (size > 50 * 1024 * 1024) {
+    if (size > maxObjectBytes && !isManifest && !isRequiredCritical) {
       skipped++;
       return;
     }
     const storagePath = cloneStoragePath(outDir, file.rel);
-    const data = readFileSync(file.abs);
+    let data = readFileSync(file.abs);
+    if (isManifest && data.length > maxObjectBytes) {
+      const slimmed = slimManifestBuffer(data);
+      if (slimmed && slimmed.length <= maxObjectBytes) {
+        data = slimmed;
+        console.warn(`[clone storage] slimmed oversized manifest.json ${size} → ${data.length} bytes`);
+      } else if (slimmed && slimmed.length > maxObjectBytes) {
+        // Last resort: drop asset lists too so storage persist can finish.
+        data = Buffer.from(JSON.stringify({
+          targetOrigin: '',
+          capturedAt: new Date().toISOString(),
+          pages: [],
+          truncated: true,
+        }), 'utf8');
+        console.warn(`[clone storage] replaced oversized manifest.json with stub (${size} bytes original)`);
+      }
+    }
+    if (data.length > maxObjectBytes) {
+      if (isManifest) {
+        skipped++;
+        failures.push(`${file.rel}: skipped (still over storage size cap after slim)`);
+        return;
+      }
+      failures.push(`${file.rel}: exceeds storage size cap (${data.length} bytes)`);
+      return;
+    }
     try {
-      await uploadCloneFileWithRetry(storagePath, data, contentTypeForPath(file.rel), isCritical ? 6 : 4);
+      await uploadCloneFileWithRetry(storagePath, data, contentTypeForPath(file.rel), isRequiredCritical ? 6 : 4);
       uploaded++;
     } catch (err) {
       failures.push(`${file.rel}: ${err?.message || err}`);
-      if (isCritical) {
-        // settings-table fallback only for small text (large HTML often fails / blows row limits)
+      if (isRequiredCritical) {
         const asText = data.toString('utf8');
         if (asText.length <= 900_000) {
           try {
@@ -1335,6 +1394,7 @@ async function persistCloneOutput(outDir, options = {}) {
           }
         }
       }
+      // Manifest failures are non-fatal — preview works from route-map + HTML.
     }
   };
   const runLimited = async (items, limit = 8) => {
@@ -1356,11 +1416,14 @@ async function persistCloneOutput(outDir, options = {}) {
       return { uploaded: 0, total: files.length, deferred: 0, critical: 0 };
     }
     await runLimited(criticalFiles, IS_HOSTED ? 4 : 8);
-    const criticalFail = failures.filter((f) =>
-      /route-map\.json|manifest\.json|captured-pages\//i.test(f),
-    );
-    if (requireCritical && criticalFail.length) {
-      throw new Error(`Failed to save clone pages to storage: ${criticalFail[0]}`);
+    // Prefer matching the start of "rel: message" failure strings.
+    // manifest.json is optional — oversized manifests must not fail the clone.
+    const requiredFail = failures.filter((f) => {
+      const rel = String(f).split(':')[0] || '';
+      return rel === 'route-map.json' || rel.startsWith('captured-pages/');
+    });
+    if (requireCritical && requiredFail.length) {
+      throw new Error(`Failed to save clone pages to storage: ${requiredFail[0]}`);
     }
     try {
       await saveCloneTextFile(cloneFileListStoragePath(outDir), JSON.stringify(criticalFiles.map(file => ({
@@ -3401,38 +3464,48 @@ async function handleRequest(req, res) {
       }
       if (!fast && (status === 'done' || status === 'error' || status === 'saving')) {
         try {
-          const readable = await verifyCloneReadable(c.out_dir);
-          if (readable.ok) {
-            status = 'done';
-            if (readable.pages > 0 && readable.pages !== pages) {
-              pages = readable.pages;
-              updateCloneStatus({ id: c.id, status: 'done', pages }).catch(() => {});
+          const out = resolveCloneOutDir(c.out_dir) || c.out_dir;
+          if (status === 'error') {
+            // Sticky failure — never promote Failed → Complete because ephemeral disk still has HTML.
+            if ((Number(pages) || 0) <= 0) {
+              const recovered = await countClonePagesBestEffort(out);
+              if (recovered > 0) pages = recovered;
             }
-          } else if (status === 'done') {
-            // Was marked complete but files are gone from disk/storage — don't fake Complete.
-            const recovered = await countClonePagesBestEffort(c.out_dir);
-            if (recovered > 0 && !IS_HOSTED) {
-              pages = recovered;
+          } else {
+            // Hosted: Complete only when Storage still has pages (disk disappears on restart).
+            let readable = IS_HOSTED
+              ? await verifyCloneReadableFromStorage(out)
+              : await verifyCloneReadable(out);
+            if (!readable.ok && !IS_HOSTED) {
+              readable = await verifyCloneReadable(out);
+            }
+            // During the same uptime, allow local pages to keep a freshly finished clone usable
+            // even if Storage list is briefly lagging — but never for prior DB errors.
+            if (!readable.ok && IS_HOSTED && status === 'saving') {
+              readable = await verifyCloneReadable(out);
+            }
+            if (readable.ok) {
               status = 'done';
-              updateCloneStatus({ id: c.id, status: 'done', pages: recovered }).catch(() => {});
-            } else {
-              status = 'error';
-              updateCloneStatus({
-                id: c.id,
-                status: 'error',
-                pages: pages || recovered || 0,
-                completedAt: c.completed_at || new Date().toISOString(),
-              }).catch(() => {});
+              if (readable.pages > 0 && readable.pages !== pages) {
+                pages = readable.pages;
+                updateCloneStatus({ id: c.id, status: 'done', pages }).catch(() => {});
+              }
+            } else if (status === 'done' || status === 'saving') {
+              const recovered = await countClonePagesBestEffort(out);
+              if (recovered > 0 && !IS_HOSTED) {
+                pages = recovered;
+                status = 'done';
+                updateCloneStatus({ id: c.id, status: 'done', pages: recovered }).catch(() => {});
+              } else {
+                status = 'error';
+                updateCloneStatus({
+                  id: c.id,
+                  status: 'error',
+                  pages: pages || recovered || 0,
+                  completedAt: c.completed_at || new Date().toISOString(),
+                }).catch(() => {});
+              }
             }
-          } else if ((Number(pages) || 0) <= 0) {
-            // Recover page count from route-map / storage without wiping history.
-            const recovered = await countClonePagesBestEffort(c.out_dir);
-            if (recovered > 0) {
-              pages = recovered;
-              status = 'done';
-              updateCloneStatus({ id: c.id, status: 'done', pages: recovered }).catch(() => {});
-            }
-            // If still unreadable, keep DB values — never force pages:0 on list.
           }
         } catch {
           /* keep stored metrics */

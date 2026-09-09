@@ -203,13 +203,19 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
         url: r.url,
         route: r.route,
         html: '',
+        // Keep asset map for preview rewrite; drop bulky network logs on hosted/fast
+        // so manifest.json stays under Supabase Free storage limits (~50MB).
         assets: r.assets,
-        network: IS_SERVERLESS ? [] : r.network,
+        network: (IS_SERVERLESS || IS_FAST_CLONE) ? [] : r.network,
         failedAssets: r.failedAssets,
       })),
     };
     const manifestPath = join(opts.out, 'manifest.json');
-    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+    // Compact JSON on hosted — pretty-print balloons Shopify-sized manifests.
+    const manifestJson = (IS_SERVERLESS || IS_FAST_CLONE)
+      ? JSON.stringify(manifest)
+      : JSON.stringify(manifest, null, 2);
+    writeFileSync(manifestPath, manifestJson, 'utf8');
     await notifyArtifact({ relPath: 'manifest.json', absPath: manifestPath, kind: 'manifest' });
 
     if (!SKIP_NEXT_GEN) {
