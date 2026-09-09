@@ -3160,6 +3160,7 @@ function listOutputFiles(outDir) {
 function githubErrorStatus(err) {
   const msg = String(err?.message || '');
   if (/bad credentials|requires authentication|unauthorized/i.test(msg)) return 401;
+  if (/git repository is empty/i.test(msg)) return 409;
   if (/not found/i.test(msg)) return 404;
   if (/validation failed|invalid|name already exists/i.test(msg)) return 400;
   if (/rate limit/i.test(msg)) return 429;
@@ -3173,6 +3174,9 @@ function friendlyGitHubError(err) {
   }
   if (/not found/i.test(msg)) {
     return 'GitHub repository not found (or this token cannot access it). Create the empty repo on GitHub first, or check owner/repo spelling and PAT access.';
+  }
+  if (/git repository is empty/i.test(msg)) {
+    return 'That GitHub repo has no commits yet. Retry push — Clonyfy will create the first commit on an empty repo.';
   }
   if (/rate limit/i.test(msg)) {
     return 'GitHub API rate limit hit. Wait a minute and try again.';
@@ -4870,22 +4874,55 @@ async function handleRequest(req, res) {
         if (tooLarge) return json(res, { error: `File is too large for GitHub API: ${tooLarge.rel}` }, 400);
 
         const refPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/ref/heads/${cleanBranch.split('/').map(encodeURIComponent).join('/')}`;
-        let ref;
+        let baseCommitSha = null;
+        let baseTreeSha = null;
+        let emptyRepo = false;
+
         try {
-          ref = await githubAPIRequest('GET', refPath, token);
-        } catch {
-          const defaultBranch = repoInfo.body.default_branch || 'main';
-          const defaultRef = await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/ref/heads/${encodeURIComponent(defaultBranch)}`, token);
-          await githubAPIRequest('POST', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/refs`, token, {
-            ref: `refs/heads/${cleanBranch}`,
-            sha: defaultRef.body.object.sha,
-          });
-          ref = await githubAPIRequest('GET', refPath, token);
+          const ref = await githubAPIRequest('GET', refPath, token);
+          baseCommitSha = ref.body.object.sha;
+        } catch (refErr) {
+          const refMsg = String(refErr?.message || '');
+          // Completely empty repos (no README / no initial commit) have no refs at all.
+          if (/git repository is empty|not found|no commit/i.test(refMsg)) {
+            const defaultBranch = repoInfo.body.default_branch || 'main';
+            if (defaultBranch !== cleanBranch) {
+              try {
+                const defaultRef = await githubAPIRequest(
+                  'GET',
+                  `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/ref/heads/${encodeURIComponent(defaultBranch)}`,
+                  token,
+                );
+                await githubAPIRequest('POST', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/refs`, token, {
+                  ref: `refs/heads/${cleanBranch}`,
+                  sha: defaultRef.body.object.sha,
+                });
+                baseCommitSha = defaultRef.body.object.sha;
+              } catch (defaultErr) {
+                if (/git repository is empty|not found|no commit/i.test(String(defaultErr?.message || ''))) {
+                  emptyRepo = true;
+                } else {
+                  throw defaultErr;
+                }
+              }
+            } else {
+              emptyRepo = /git repository is empty|not found|no commit/i.test(refMsg);
+              if (!emptyRepo) throw refErr;
+            }
+          } else {
+            throw refErr;
+          }
         }
 
-        const baseCommitSha = ref.body.object.sha;
-        const baseCommit = await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/commits/${baseCommitSha}`, token);
-        const baseTreeSha = baseCommit.body.tree.sha;
+        if (baseCommitSha) {
+          const baseCommit = await githubAPIRequest(
+            'GET',
+            `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/commits/${baseCommitSha}`,
+            token,
+          );
+          baseTreeSha = baseCommit.body.tree.sha;
+        }
+
         const { entries, nextPaths } = await githubUploadBlobsLimited(
           files,
           owner,
@@ -4895,7 +4932,7 @@ async function handleRequest(req, res) {
           IS_HOSTED ? 3 : 6,
         );
 
-        if (cleanTarget) {
+        if (cleanTarget && baseTreeSha) {
           const tree = await githubAPIRequest('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/trees/${baseTreeSha}?recursive=1`, token);
           for (const item of tree.body.tree || []) {
             if (item.type !== 'blob') continue;
@@ -4906,18 +4943,38 @@ async function handleRequest(req, res) {
           }
         }
 
-        const newTree = await githubAPIRequest('POST', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/trees`, token, {
-          base_tree: baseTreeSha,
-          tree: entries,
-        });
+        const treePayload = baseTreeSha
+          ? { base_tree: baseTreeSha, tree: entries }
+          : { tree: entries };
+        const newTree = await githubAPIRequest(
+          'POST',
+          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/trees`,
+          token,
+          treePayload,
+        );
         const message = String(commitMessage || '').trim() || `Import CLONYFY output (${outDir.split(/[\\/]/).pop()})`;
-        const commit = await githubAPIRequest('POST', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/commits`, token, {
+        const commitPayload = {
           message,
           tree: newTree.body.sha,
-          parents: [baseCommitSha],
-        });
-        await githubAPIRequest('PATCH', refPath, token, { sha: commit.body.sha, force: false });
-        audit(ghUser.id, ghUser.name, 'github_push', `repo=${owner}/${repoName} files=${files.length}`, ip);
+          parents: baseCommitSha ? [baseCommitSha] : [],
+        };
+        const commit = await githubAPIRequest(
+          'POST',
+          `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/commits`,
+          token,
+          commitPayload,
+        );
+
+        if (emptyRepo || !baseCommitSha) {
+          // First commit on an empty repo: create the branch ref.
+          await githubAPIRequest('POST', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/refs`, token, {
+            ref: `refs/heads/${cleanBranch}`,
+            sha: commit.body.sha,
+          });
+        } else {
+          await githubAPIRequest('PATCH', refPath, token, { sha: commit.body.sha, force: false });
+        }
+        audit(ghUser.id, ghUser.name, 'github_push', `repo=${owner}/${repoName} files=${files.length} empty=${emptyRepo || !baseCommitSha}`, ip);
         return json(res, {
           ok: true,
           files: files.length,
@@ -4925,6 +4982,7 @@ async function handleRequest(req, res) {
           targetPath: prefix,
           commitUrl: commit.body.html_url,
           repoUrl: repoInfo.body.html_url,
+          emptyRepoBootstrapped: !!(emptyRepo || !baseCommitSha),
           createdRepo: !!(createRepo && repoInfo.body?.created_at && Date.now() - Date.parse(repoInfo.body.created_at) < 60_000),
         });
       } finally {
