@@ -5007,14 +5007,17 @@ async function handleRequest(req, res) {
         const tooLarge = files.find(f => f.size > 95 * 1024 * 1024);
         if (tooLarge) return json(res, { error: `File is too large for GitHub API: ${tooLarge.rel}` }, 400);
 
-        const refPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/ref/heads/${cleanBranch.split('/').map(encodeURIComponent).join('/')}`;
+        // GET uses singular /git/ref/... ; PATCH/update must use plural /git/refs/...
+        const branchRefSuffix = `heads/${cleanBranch.split('/').map(encodeURIComponent).join('/')}`;
+        const getRefPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/ref/${branchRefSuffix}`;
+        const updateRefPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/refs/${branchRefSuffix}`;
         let baseCommitSha = null;
         let baseTreeSha = null;
 
         // Only bootstrap when GitHub says the repo is empty (409) — never trust size===0.
         let emptyLikely = isGitHubRepoEmpty(repoInfo);
         try {
-          await githubAPIRequest('GET', refPath, token);
+          await githubAPIRequest('GET', getRefPath, token);
           emptyLikely = false;
         } catch (probeErr) {
           if (isGitHubEmptyRepoError(probeErr)) emptyLikely = true;
@@ -5030,14 +5033,14 @@ async function handleRequest(req, res) {
         }
 
         try {
-          const ref = await githubAPIRequest('GET', refPath, token);
+          const ref = await githubAPIRequest('GET', getRefPath, token);
           baseCommitSha = ref.body.object.sha;
         } catch (refErr) {
           const defaultBranch = repoInfo.body?.default_branch || 'main';
           if (defaultBranch === cleanBranch) {
             if (isGitHubEmptyRepoError(refErr)) {
               await bootstrapEmptyGitHubRepo(token, owner, repoName, cleanBranch);
-              const ref = await githubAPIRequest('GET', refPath, token);
+              const ref = await githubAPIRequest('GET', getRefPath, token);
               baseCommitSha = ref.body.object.sha;
             } else {
               throw refErr;
@@ -5057,7 +5060,7 @@ async function handleRequest(req, res) {
             } catch (defaultErr) {
               if (isGitHubEmptyRepoError(defaultErr)) {
                 await bootstrapEmptyGitHubRepo(token, owner, repoName, cleanBranch);
-                const ref = await githubAPIRequest('GET', refPath, token).catch(async () => {
+                const ref = await githubAPIRequest('GET', getRefPath, token).catch(async () => {
                   const dref = await githubAPIRequest(
                     'GET',
                     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/ref/heads/${encodeURIComponent(defaultBranch)}`,
@@ -5141,7 +5144,17 @@ async function handleRequest(req, res) {
               parents: [baseCommitSha],
             },
           );
-          await githubAPIRequest('PATCH', refPath, token, { sha: commit.body.sha, force: false });
+          await githubAPIRequest('PATCH', updateRefPath, token, { sha: commit.body.sha, force: false }).catch(async (patchErr) => {
+            // If the branch ref is missing, create it; do not use singular /git/ref for PATCH (404).
+            if (Number(patchErr?.statusCode) === 404 || /not found/i.test(String(patchErr?.message || ''))) {
+              await githubAPIRequest('POST', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/git/refs`, token, {
+                ref: `refs/heads/${cleanBranch}`,
+                sha: commit.body.sha,
+              });
+              return;
+            }
+            throw patchErr;
+          });
           baseCommitSha = commit.body.sha;
           baseTreeSha = newTree.body.sha;
         }
