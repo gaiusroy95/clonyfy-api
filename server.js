@@ -2274,8 +2274,9 @@ async function prepareHtmlForFigmaExport(html, outDir) {
   out = String(out)
     .replace(/<script[^>]*data-clonyfy-scroll-reveal[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style[^>]*id="clonyfy-scroll-reveal-style"[^>]*>[\s\S]*?<\/style>/gi, '');
-  if (IS_SERVERLESS) {
-    // Inlining every asset into HTML exhausts ephemeral disk; Playwright routes serve assets instead.
+  // Hosted/low-memory: never inline dozens of assets as data-URLs (Shopify OOMs / times out).
+  // Playwright serves assets via figmaAssetReader + route interception instead.
+  if (IS_SERVERLESS || IS_HOSTED || IS_LOW_MEMORY) {
     return out;
   }
   out = await inlinePreviewAssetsForRender(out, outDir);
@@ -4548,31 +4549,45 @@ async function handleRequest(req, res) {
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
     const route = url.searchParams.get('route') || '/';
-    const viewportWidth = Math.min(2560, Math.max(320, parseInt(url.searchParams.get('width') || '1440', 10) || 1440));
+    const viewportWidth = Math.min(1440, Math.max(320, parseInt(url.searchParams.get('width') || '1280', 10) || 1280));
+    const deadlineMs = IS_LOW_MEMORY ? 75_000 : (IS_HOSTED ? 100_000 : 180_000);
     try {
       const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
       if (!map) return json(res, { error: 'No pages found' }, 404);
       const filename = map[route] || map['/'];
       if (!filename) return json(res, { error: 'Route not found' }, 404);
       const data = await readCloneFile(outDir, capturedPageStorageRel(filename));
-      if (!data) return json(res, { error: 'Page file missing' }, 404);
-      const html = await prepareHtmlForFigmaExport(data.toString('utf8'), outDir);
-      const scene = await htmlToFigmaScene(html, {
-        viewportWidth,
-        title: route,
-        route,
-        readAsset: IS_HOSTED ? figmaAssetReader(outDir) : null,
-      });
+      if (!data) return json(res, { error: 'Page file missing — re-run the clone so files are saved to storage.' }, 404);
+      const runExport = async () => {
+        const html = await prepareHtmlForFigmaExport(data.toString('utf8'), outDir);
+        return htmlToFigmaScene(html, {
+          viewportWidth,
+          title: route,
+          route,
+          readAsset: (IS_HOSTED || IS_SERVERLESS || IS_LOW_MEMORY) ? figmaAssetReader(outDir) : null,
+        });
+      };
+      const scene = await Promise.race([
+        runExport(),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error(
+            'Figma Desktop scene timed out. Try again, or use Download SVG for Figma Web.',
+          )), deadlineMs);
+        }),
+      ]);
       audit(figmaUser.id, figmaUser.name, 'figma_scene', `outDir=${outDir} route=${route}`, ip);
       return respondWithFigmaScene(res, scene, figmaUser);
     } catch (err) {
       const msg = String(err?.message || err || 'Figma scene export failed');
       const oom = /heap|ENOMEM|out of memory|killed|ENOSPC/i.test(msg);
+      const timedOut = /timed out/i.test(msg);
       return json(res, {
         error: oom
-          ? 'Figma Desktop export ran out of memory on this host. Try a smaller page or upgrade Backend RAM.'
-          : (msg || 'Figma scene export failed'),
-      }, 500);
+          ? 'Figma Desktop export ran out of memory. Try Download SVG, or upgrade Backend RAM.'
+          : timedOut
+            ? msg
+            : (msg || 'Figma scene export failed'),
+      }, timedOut ? 504 : 500);
     }
   }
 
@@ -4584,20 +4599,31 @@ async function handleRequest(req, res) {
     if (!outDir) return json(res, { error: 'Invalid output folder' }, 400);
     if (!await canUseCloneOutput(figmaUser, outDir)) return json(res, { error: 'Not found' }, 404);
     const route = url.searchParams.get('route') || '/';
-    const viewportWidth = Math.min(2560, Math.max(320, parseInt(url.searchParams.get('width') || '1440', 10) || 1440));
+    const viewportWidth = Math.min(1440, Math.max(320, parseInt(url.searchParams.get('width') || '1280', 10) || 1280));
+    const deadlineMs = IS_LOW_MEMORY ? 75_000 : (IS_HOSTED ? 100_000 : 180_000);
     try {
       const map = await loadRouteMapAsync(outDir) || await inferRouteMapFromCapturedPages(outDir);
       if (!map) return json(res, { error: 'No pages found' }, 404);
       const filename = map[route] || map['/'];
       if (!filename) return json(res, { error: 'Route not found' }, 404);
       const data = await readCloneFile(outDir, capturedPageStorageRel(filename));
-      if (!data) return json(res, { error: 'Page file missing' }, 404);
-      const html = await prepareHtmlForFigmaExport(data.toString('utf8'), outDir);
-      const svg = await htmlToFigmaSvg(html, {
-        viewportWidth,
-        title: route,
-        readAsset: IS_HOSTED ? figmaAssetReader(outDir) : null,
-      });
+      if (!data) return json(res, { error: 'Page file missing — re-run the clone so files are saved to storage.' }, 404);
+      const runExport = async () => {
+        const html = await prepareHtmlForFigmaExport(data.toString('utf8'), outDir);
+        return htmlToFigmaSvg(html, {
+          viewportWidth,
+          title: route,
+          readAsset: (IS_HOSTED || IS_SERVERLESS || IS_LOW_MEMORY) ? figmaAssetReader(outDir) : null,
+        });
+      };
+      const svg = await Promise.race([
+        runExport(),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error(
+            'Figma SVG export timed out. Try Export for Figma Desktop, or a smaller page.',
+          )), deadlineMs);
+        }),
+      ]);
       audit(figmaUser.id, figmaUser.name, 'figma_export', `outDir=${outDir} route=${route}`, ip);
       res.writeHead(200, {
         'Content-Type': 'image/svg+xml; charset=utf-8',
@@ -4608,11 +4634,14 @@ async function handleRequest(req, res) {
     } catch (err) {
       const msg = String(err?.message || err || 'Figma export failed');
       const oom = /heap|ENOMEM|out of memory|killed|ENOSPC/i.test(msg);
+      const timedOut = /timed out/i.test(msg);
       return json(res, {
         error: oom
-          ? 'Figma export ran out of memory on this host. Try Export for Figma Desktop on a single page, or upgrade Backend RAM.'
-          : (msg || 'Figma export failed'),
-      }, 500);
+          ? 'Figma export ran out of memory on this host. Try Export for Figma Desktop, or upgrade Backend RAM.'
+          : timedOut
+            ? msg
+            : (msg || 'Figma export failed'),
+      }, timedOut ? 504 : 500);
     }
     return;
   }
