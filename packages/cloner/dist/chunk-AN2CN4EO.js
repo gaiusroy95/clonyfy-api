@@ -1351,7 +1351,7 @@ var USER_AGENT2 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 var MAX_ASSET_BYTES = (IS_SERVERLESS2 ? 4 : 50) * 1024 * 1024;
 var MAX_CSS_BYTES = (IS_SERVERLESS2 ? 3 : 25) * 1024 * 1024;
 var SERVERLESS_DOM_ASSET_CAP = 220;
-var SHOPIFY_DOM_ASSET_CAP = 480;
+var SHOPIFY_DOM_ASSET_CAP = 650;
 var CSS_REF_SCAN_MAX_BYTES = 4 * 1024 * 1024;
 function isShopifyLikeHost(hostname) {
   const h = String(hostname || "").toLowerCase();
@@ -1412,6 +1412,34 @@ function isLiveCdnMediaUrl(url) {
   } catch {
     return /cdn\.shopify\.com|shopifycdn|shopifycloud/i.test(url);
   }
+}
+function extractShopifyBrochureAssetUrls(html) {
+  const text = String(html || "").replace(/\\u0026/g, "&").replace(/&amp;/gi, "&");
+  const re = /https:\/\/cdn\.shopify\.com\/b\/shopify-brochure2-assets\/[a-f0-9]+\.(?:png|jpe?g|webp|avif|svg|gif|mp4|webm|mov)(?:\?[^"'\\\s]*)?/gi;
+  return [...new Set([...text.matchAll(re)].map((m) => m[0]))];
+}
+function isShopifyBrochureImageUrl(url) {
+  return /cdn\.shopify\.com\/b\/shopify-brochure2-assets\/[a-f0-9]+\.(?:png|jpe?g|webp|avif|svg|gif)(?:\?|$)/i.test(url);
+}
+function isShopifyBrochureVideoUrl(url) {
+  return /cdn\.shopify\.com\/b\/shopify-brochure2-assets\/[a-f0-9]+\.(?:mp4|webm|mov)(?:\?|$)/i.test(url);
+}
+function shopifyVideoPosterMap(html) {
+  const text = String(html || "").replace(/\\u0026/g, "&").replace(/&amp;/gi, "&");
+  const tokens = [...text.matchAll(/https:\/\/cdn\.shopify\.com\/b\/shopify-brochure2-assets\/[a-f0-9]+\.(?:png|jpe?g|webp|avif|svg|gif|mp4|webm|mov)(?:\?[^"'\\\s]*)?/gi)].map((m) => m[0]);
+  const map = /* @__PURE__ */ new Map();
+  for (let i = 0; i < tokens.length; i++) {
+    if (!isShopifyBrochureVideoUrl(tokens[i])) continue;
+    for (let j = i + 1; j < Math.min(i + 6, tokens.length); j++) {
+      if (isShopifyBrochureImageUrl(tokens[j]) && /\.(?:png|jpe?g|webp|avif)(?:\?|$)/i.test(tokens[j])) {
+        map.set(tokens[i], tokens[j]);
+        const hash = tokens[i].match(/\/([a-f0-9]+)\.(?:mp4|webm|mov)/i)?.[1];
+        if (hash) map.set(hash, tokens[j]);
+        break;
+      }
+    }
+  }
+  return map;
 }
 function shouldSkipAsset(url) {
   return SKIP_ASSET_PATTERNS.some((p) => p.test(url));
@@ -1971,6 +1999,20 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       return [];
     });
     let domAssetUrls = await collectDomAssetUrls();
+    let videoPosterBySrc = /* @__PURE__ */ new Map();
+    if (deepMedia) {
+      try {
+        const rawHtml = await page.content();
+        videoPosterBySrc = shopifyVideoPosterMap(rawHtml);
+        const brochureUrls = extractShopifyBrochureAssetUrls(rawHtml).filter((u) => isShopifyBrochureImageUrl(u));
+        if (brochureUrls.length) {
+          logger.debug(`  [SHOPIFY BROCHURE] ${brochureUrls.length} image URLs extracted from page payload`);
+          domAssetUrls = [...domAssetUrls, ...brochureUrls];
+        }
+      } catch (err) {
+        logger.debug(`  [SHOPIFY BROCHURE WARN] ${err.message}`);
+      }
+    }
     domAssetUrls = [...new Set(
       domAssetUrls.map((u) => decodeHtmlUrl(u)).map((u) => {
         try {
@@ -2380,18 +2422,182 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     });
     await revealNavDropdownLinks(page);
     if (deepMedia) {
-      await page.waitForTimeout(IS_SERVERLESS2 ? 1600 : 2200).catch(() => {
+      await page.waitForTimeout(IS_SERVERLESS2 ? 1800 : 2600).catch(() => {
+      });
+      await page.waitForFunction(() => {
+        const needles = [
+          /Your brand has entered the chat/i,
+          /Sell more in more places/i,
+          /Sell face to face/i
+        ];
+        let foundMedia = 0;
+        for (const re of needles) {
+          const el = [...document.querySelectorAll("h1,h2,h3,h4,p,span")].find((n) => re.test(n.textContent || ""));
+          if (!el) continue;
+          const root = el.closest("section") || el.closest('[class*="section"]') || el.parentElement?.parentElement;
+          if (root && root.querySelector("img,video,picture,source,canvas")) foundMedia++;
+        }
+        const videos = document.querySelectorAll("video").length;
+        const imgs = document.querySelectorAll('img[src*="cdn.shopify"], img[src*="brochure"]').length;
+        return foundMedia >= 1 || videos >= 1 || imgs >= 8;
+      }, void 0, { timeout: IS_SERVERLESS2 ? 6e3 : 1e4 }).catch(() => {
+      });
+      try {
+        const hydratedHtml = await page.content();
+        const more = shopifyVideoPosterMap(hydratedHtml);
+        for (const [k, v] of more) videoPosterBySrc.set(k, v);
+        const moreImages = extractShopifyBrochureAssetUrls(hydratedHtml).filter((u) => isShopifyBrochureImageUrl(u));
+        const brochurePending = [];
+        for (const u of moreImages.slice(0, IS_SERVERLESS2 ? 120 : 250)) {
+          if (assetMap.has(u) || shouldSkipAsset(u)) continue;
+          brochurePending.push(async () => {
+            try {
+              const absUrl = preferLargestSrcsetCandidate(new URL(decodeHtmlUrl(u), pageUrl).href);
+              if (assetMap.has(absUrl)) return;
+              const r = await fetch(absUrl, {
+                headers: assetFetchHeaders(pageUrl),
+                signal: AbortSignal.timeout(IS_SERVERLESS2 ? 8e3 : 15e3)
+              });
+              if (!r.ok) return;
+              const buf = Buffer.from(await r.arrayBuffer());
+              if (buf.length > maxAssetBytes) return;
+              await saveAsset(absUrl, buf, r.headers.get("content-type") || "image/png");
+            } catch {
+            }
+          });
+        }
+        const batch = IS_SERVERLESS2 ? 4 : 10;
+        for (let i = 0; i < brochurePending.length; i += batch) {
+          await Promise.all(brochurePending.slice(i, i + batch).map((fn) => fn()));
+        }
+        if (brochurePending.length) {
+          logger.debug(`  [SHOPIFY BROCHURE] downloaded/queued ${brochurePending.length} still assets after hydrate`);
+        }
+      } catch (err) {
+        logger.debug(`  [SHOPIFY BROCHURE HYDRATE WARN] ${err.message}`);
+      }
+      const posterEntries = [...videoPosterBySrc.entries()];
+      let sectionFillPayload = [];
+      try {
+        const htmlForSections = await page.content();
+        const decoded = htmlForSections.replace(/\\u0026/g, "&").replace(/&amp;/gi, "&");
+        const sectionNeedles = [
+          "Your brand has entered the chat",
+          "Sell more in more places",
+          "Sell face to face",
+          "Put your products where shoppers",
+          "Shop app"
+        ];
+        sectionFillPayload = sectionNeedles.map((needle) => {
+          const i = decoded.indexOf(needle);
+          if (i < 0) return { needle, images: [] };
+          const slice = decoded.slice(Math.max(0, i - 1500), i + 9e3);
+          const images = extractShopifyBrochureAssetUrls(slice).filter((u) => isShopifyBrochureImageUrl(u) && /\.(?:png|jpe?g|webp)(?:\?|$)/i.test(u));
+          const ranked = [...new Set(images)].sort((a, b) => {
+            const wa = Number(a.match(/originalWidth=(\d+)/i)?.[1] || 0);
+            const wb = Number(b.match(/originalWidth=(\d+)/i)?.[1] || 0);
+            return wb - wa;
+          });
+          return { needle, images: ranked.slice(0, 8) };
+        });
+      } catch {
+      }
+      await page.evaluate((args) => {
+        const posterMap = new Map(args.posters);
+        const resolvePoster = (video) => {
+          const direct = (video.getAttribute("poster") || "").trim();
+          if (direct) return direct;
+          for (const source of Array.from(video.querySelectorAll("source"))) {
+            const src = source.getAttribute("src") || "";
+            if (!src) continue;
+            if (posterMap.has(src)) return posterMap.get(src) || "";
+            const hash2 = src.match(/\/([a-f0-9]+)\.(?:mp4|webm|mov)/i)?.[1];
+            if (hash2 && posterMap.has(hash2)) return posterMap.get(hash2) || "";
+          }
+          const vsrc = video.getAttribute("src") || video.currentSrc || "";
+          if (vsrc && posterMap.has(vsrc)) return posterMap.get(vsrc) || "";
+          const hash = vsrc.match(/\/([a-f0-9]+)\.(?:mp4|webm|mov)/i)?.[1];
+          if (hash && posterMap.has(hash)) return posterMap.get(hash) || "";
+          return "";
+        };
+        document.querySelectorAll("video").forEach((node) => {
+          const video = node;
+          const poster = resolvePoster(video);
+          if (!poster) return;
+          const img = document.createElement("img");
+          img.src = poster;
+          img.alt = video.getAttribute("aria-label") || video.getAttribute("title") || "";
+          img.loading = "eager";
+          img.decoding = "sync";
+          const cs = window.getComputedStyle(video);
+          img.style.cssText = [
+            "display:block",
+            "width:100%",
+            "height:100%",
+            "max-width:100%",
+            "object-fit:cover",
+            cs.borderRadius && cs.borderRadius !== "0px" ? `border-radius:${cs.borderRadius}` : ""
+          ].filter(Boolean).join(";");
+          img.setAttribute("data-clonyfy-video-poster", "1");
+          video.replaceWith(img);
+        });
+        const findSectionRoot = (needle) => {
+          const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+          const el = [...document.querySelectorAll("h1,h2,h3,h4,p,span,a")].find((n) => re.test(n.textContent || ""));
+          if (!el) return null;
+          return el.closest("section") || el.closest('[class*="section"]') || el.closest("article") || el.parentElement?.parentElement || el.parentElement;
+        };
+        const isEmptyMediaShell = (el) => {
+          if (el.closest("nav,header,footer")) return false;
+          if (el.querySelector("img[data-clonyfy-video-poster],img[data-clonyfy-section-fill],video,picture,canvas,iframe")) return false;
+          const media = el.querySelectorAll("img");
+          if (media.length > 0) {
+            const hasLarge = [...media].some((img) => {
+              const r2 = img.getBoundingClientRect();
+              return r2.width >= 120 && r2.height >= 80;
+            });
+            if (hasLarge) return false;
+          }
+          const r = el.getBoundingClientRect();
+          if (r.width < 180 || r.height < 140) return false;
+          const cs = window.getComputedStyle(el);
+          const radius = parseFloat(cs.borderRadius || "0") || 0;
+          const hasAspect = cs.aspectRatio && cs.aspectRatio !== "auto";
+          return radius >= 8 || !!hasAspect || r.height >= 220;
+        };
+        for (const section of args.sections) {
+          if (!section.images.length) continue;
+          const root = findSectionRoot(section.needle);
+          if (!root) continue;
+          if (root.querySelector("img[data-clonyfy-video-poster],img[data-clonyfy-section-fill]")) continue;
+          const shells = [root, ...Array.from(root.querySelectorAll("div,figure,aside"))].filter((n) => isEmptyMediaShell(n));
+          shells.sort((a, b) => b.getBoundingClientRect().width * b.getBoundingClientRect().height - a.getBoundingClientRect().width * a.getBoundingClientRect().height);
+          const shell = shells[0];
+          if (!shell) continue;
+          const used = new Set(Array.from(root.querySelectorAll("img")).map((img2) => img2.currentSrc || img2.src));
+          const pick = section.images.find((u) => !used.has(u)) || section.images[0];
+          if (!pick) continue;
+          const img = document.createElement("img");
+          img.src = pick;
+          img.alt = "";
+          img.loading = "eager";
+          img.setAttribute("data-clonyfy-section-fill", "1");
+          img.style.cssText = "display:block;width:100%;height:100%;min-height:220px;object-fit:cover;border-radius:inherit;";
+          shell.appendChild(img);
+        }
+      }, { posters: posterEntries, sections: sectionFillPayload }).catch((err) => {
+        logger.debug(`  [SHOPIFY VIDEO FREEZE WARN] ${err.message}`);
       });
       await page.waitForFunction(() => {
         const imgs = Array.from(document.querySelectorAll(
-          '[id^="ab-section"] img, [class*="ab-section"] img, section img[src*="cdn.shopify"], main img[src*="cdn.shopify"]'
+          'img[data-clonyfy-video-poster], img[data-clonyfy-section-fill], [id^="ab-section"] img, section img[src*="cdn.shopify"]'
         ));
         if (!imgs.length) return true;
         const ready = imgs.filter((img) => {
           const el = img;
           return el.complete && el.naturalWidth > 0;
         }).length;
-        return ready >= Math.min(imgs.length, Math.max(3, Math.floor(imgs.length * 0.4)));
+        return ready >= Math.min(imgs.length, Math.max(2, Math.floor(imgs.length * 0.35)));
       }, void 0, { timeout: IS_SERVERLESS2 ? 5e3 : 8e3 }).catch(() => {
       });
     }
@@ -12698,4 +12904,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-THCD2LYC.js.map
+//# sourceMappingURL=chunk-AN2CN4EO.js.map

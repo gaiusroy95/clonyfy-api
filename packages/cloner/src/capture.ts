@@ -178,7 +178,7 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const MAX_ASSET_BYTES = (IS_SERVERLESS ? 4 : 50) * 1024 * 1024; // Cap large media so hosted persist finishes.
 const MAX_CSS_BYTES = (IS_SERVERLESS ? 3 : 25) * 1024 * 1024; // CSS bundles can be larger than media icons/fonts.
 const SERVERLESS_DOM_ASSET_CAP = 220; // Shopify homepage alone has 50+ images + fonts/videos.
-const SHOPIFY_DOM_ASSET_CAP = 480; // Marketing/brochure pages ship many CDN images + videos.
+const SHOPIFY_DOM_ASSET_CAP = 650; // Marketing/brochure pages ship many CDN images + videos.
 // Upper bound on CSS we scan for url()/image-set()/@import references. The old
 // 500KB limit silently skipped ref-extraction for big bundles (Tailwind/CMS CSS
 // routinely exceeds it), so fonts and background images they referenced never
@@ -274,6 +274,41 @@ function isLiveCdnMediaUrl(url: string): boolean {
   } catch {
     return /cdn\.shopify\.com|shopifycdn|shopifycloud/i.test(url);
   }
+}
+
+/** Brochure assets live in React Router JSON as plain URL strings — not always as <img>/<video> yet. */
+function extractShopifyBrochureAssetUrls(html: string): string[] {
+  const text = String(html || '').replace(/\\u0026/g, '&').replace(/&amp;/gi, '&');
+  const re = /https:\/\/cdn\.shopify\.com\/b\/shopify-brochure2-assets\/[a-f0-9]+\.(?:png|jpe?g|webp|avif|svg|gif|mp4|webm|mov)(?:\?[^"'\\\s]*)?/gi;
+  return [...new Set([...text.matchAll(re)].map((m) => m[0]))];
+}
+
+function isShopifyBrochureImageUrl(url: string): boolean {
+  return /cdn\.shopify\.com\/b\/shopify-brochure2-assets\/[a-f0-9]+\.(?:png|jpe?g|webp|avif|svg|gif)(?:\?|$)/i.test(url);
+}
+
+function isShopifyBrochureVideoUrl(url: string): boolean {
+  return /cdn\.shopify\.com\/b\/shopify-brochure2-assets\/[a-f0-9]+\.(?:mp4|webm|mov)(?:\?|$)/i.test(url);
+}
+
+/** Map video URL → following poster/image URL in brochure payload order. */
+function shopifyVideoPosterMap(html: string): Map<string, string> {
+  const text = String(html || '').replace(/\\u0026/g, '&').replace(/&amp;/gi, '&');
+  const tokens = [...text.matchAll(/https:\/\/cdn\.shopify\.com\/b\/shopify-brochure2-assets\/[a-f0-9]+\.(?:png|jpe?g|webp|avif|svg|gif|mp4|webm|mov)(?:\?[^"'\\\s]*)?/gi)].map((m) => m[0]);
+  const map = new Map<string, string>();
+  for (let i = 0; i < tokens.length; i++) {
+    if (!isShopifyBrochureVideoUrl(tokens[i])) continue;
+    for (let j = i + 1; j < Math.min(i + 6, tokens.length); j++) {
+      if (isShopifyBrochureImageUrl(tokens[j]) && /\.(?:png|jpe?g|webp|avif)(?:\?|$)/i.test(tokens[j])) {
+        map.set(tokens[i], tokens[j]);
+        // Also key by basename hash so source.src variants match.
+        const hash = tokens[i].match(/\/([a-f0-9]+)\.(?:mp4|webm|mov)/i)?.[1];
+        if (hash) map.set(hash, tokens[j]);
+        break;
+      }
+    }
+  }
+  return map;
 }
 
 function shouldSkipAsset(url: string): boolean {
@@ -931,6 +966,24 @@ export async function capturePage(
   });
 
   let domAssetUrls = await collectDomAssetUrls();
+  // Shopify brochure media is often only referenced inside React Router JSON payloads.
+  // Pull those CDN URLs from the raw HTML so we download posters/images even when
+  // <img>/<video> tags are not in the DOM yet.
+  let videoPosterBySrc = new Map<string, string>();
+  if (deepMedia) {
+    try {
+      const rawHtml = await page.content();
+      videoPosterBySrc = shopifyVideoPosterMap(rawHtml);
+      const brochureUrls = extractShopifyBrochureAssetUrls(rawHtml)
+        .filter((u) => isShopifyBrochureImageUrl(u)); // prefer stills; videos freeze to posters later
+      if (brochureUrls.length) {
+        logger.debug(`  [SHOPIFY BROCHURE] ${brochureUrls.length} image URLs extracted from page payload`);
+        domAssetUrls = [...domAssetUrls, ...brochureUrls];
+      }
+    } catch (err) {
+      logger.debug(`  [SHOPIFY BROCHURE WARN] ${(err as Error).message}`);
+    }
+  }
   // Normalize Shopify CDN resize variants → one canonical URL each.
   domAssetUrls = [...new Set(
     domAssetUrls
@@ -1388,19 +1441,200 @@ export async function capturePage(
   await revealNavDropdownLinks(page);
 
   // Shopify brochure sections use Tailwind opacity-0 + delay-500/duration-1000.
-  // Give transitions time to finish, then force-reveal non-rotator opacity-0 nodes.
+  // Give transitions time to finish, hydrate media, freeze videos to posters, then reveal.
   if (deepMedia) {
-    await page.waitForTimeout(IS_SERVERLESS ? 1600 : 2200).catch(() => {});
+    await page.waitForTimeout(IS_SERVERLESS ? 1800 : 2600).catch(() => {});
+    // Wait until key marketing sections have some media or timeout.
+    await page.waitForFunction(() => {
+      const needles = [
+        /Your brand has entered the chat/i,
+        /Sell more in more places/i,
+        /Sell face to face/i,
+      ];
+      let foundMedia = 0;
+      for (const re of needles) {
+        const el = [...document.querySelectorAll('h1,h2,h3,h4,p,span')].find((n) => re.test(n.textContent || ''));
+        if (!el) continue;
+        const root = el.closest('section') || el.closest('[class*="section"]') || el.parentElement?.parentElement;
+        if (root && root.querySelector('img,video,picture,source,canvas')) foundMedia++;
+      }
+      const videos = document.querySelectorAll('video').length;
+      const imgs = document.querySelectorAll('img[src*="cdn.shopify"], img[src*="brochure"]').length;
+      return foundMedia >= 1 || videos >= 1 || imgs >= 8;
+    }, undefined, { timeout: IS_SERVERLESS ? 6_000 : 10_000 }).catch(() => {});
+
+    // Refresh poster map after hydration may have rewritten the DOM, and download stills.
+    try {
+      const hydratedHtml = await page.content();
+      const more = shopifyVideoPosterMap(hydratedHtml);
+      for (const [k, v] of more) videoPosterBySrc.set(k, v);
+      const moreImages = extractShopifyBrochureAssetUrls(hydratedHtml).filter((u) => isShopifyBrochureImageUrl(u));
+      const brochurePending: Array<() => Promise<void>> = [];
+      for (const u of moreImages.slice(0, IS_SERVERLESS ? 120 : 250)) {
+        if (assetMap.has(u) || shouldSkipAsset(u)) continue;
+        brochurePending.push(async () => {
+          try {
+            const absUrl = preferLargestSrcsetCandidate(new URL(decodeHtmlUrl(u), pageUrl).href);
+            if (assetMap.has(absUrl)) return;
+            const r = await fetch(absUrl, {
+              headers: assetFetchHeaders(pageUrl),
+              signal: AbortSignal.timeout(IS_SERVERLESS ? 8_000 : 15_000),
+            });
+            if (!r.ok) return;
+            const buf = Buffer.from(await r.arrayBuffer());
+            if (buf.length > maxAssetBytes) return;
+            await saveAsset(absUrl, buf, r.headers.get('content-type') || 'image/png');
+          } catch { /* best-effort */ }
+        });
+      }
+      const batch = IS_SERVERLESS ? 4 : 10;
+      for (let i = 0; i < brochurePending.length; i += batch) {
+        await Promise.all(brochurePending.slice(i, i + batch).map((fn) => fn()));
+      }
+      if (brochurePending.length) {
+        logger.debug(`  [SHOPIFY BROCHURE] downloaded/queued ${brochurePending.length} still assets after hydrate`);
+      }
+    } catch (err) {
+      logger.debug(`  [SHOPIFY BROCHURE HYDRATE WARN] ${(err as Error).message}`);
+    }
+
+    const posterEntries = [...videoPosterBySrc.entries()];
+    // Section-scoped stills from the original HTML payload (better than global candidates).
+    let sectionFillPayload: Array<{ needle: string; images: string[] }> = [];
+    try {
+      const htmlForSections = await page.content();
+      const decoded = htmlForSections.replace(/\\u0026/g, '&').replace(/&amp;/gi, '&');
+      const sectionNeedles = [
+        'Your brand has entered the chat',
+        'Sell more in more places',
+        'Sell face to face',
+        'Put your products where shoppers',
+        'Shop app',
+      ];
+      sectionFillPayload = sectionNeedles.map((needle) => {
+        const i = decoded.indexOf(needle);
+        if (i < 0) return { needle, images: [] as string[] };
+        const slice = decoded.slice(Math.max(0, i - 1500), i + 9000);
+        const images = extractShopifyBrochureAssetUrls(slice)
+          .filter((u) => isShopifyBrochureImageUrl(u) && /\.(?:png|jpe?g|webp)(?:\?|$)/i.test(u));
+        // Prefer large marketing stills over tiny icons/logos.
+        const ranked = [...new Set(images)].sort((a, b) => {
+          const wa = Number(a.match(/originalWidth=(\d+)/i)?.[1] || 0);
+          const wb = Number(b.match(/originalWidth=(\d+)/i)?.[1] || 0);
+          return wb - wa;
+        });
+        return { needle, images: ranked.slice(0, 8) };
+      });
+    } catch { /* ignore */ }
+
+    await page.evaluate((args: { posters: Array<[string, string]>; sections: Array<{ needle: string; images: string[] }> }) => {
+      const posterMap = new Map(args.posters);
+      const resolvePoster = (video: HTMLVideoElement): string => {
+        const direct = (video.getAttribute('poster') || '').trim();
+        if (direct) return direct;
+        for (const source of Array.from(video.querySelectorAll('source'))) {
+          const src = source.getAttribute('src') || '';
+          if (!src) continue;
+          if (posterMap.has(src)) return posterMap.get(src) || '';
+          const hash = src.match(/\/([a-f0-9]+)\.(?:mp4|webm|mov)/i)?.[1];
+          if (hash && posterMap.has(hash)) return posterMap.get(hash) || '';
+        }
+        const vsrc = video.getAttribute('src') || video.currentSrc || '';
+        if (vsrc && posterMap.has(vsrc)) return posterMap.get(vsrc) || '';
+        const hash = vsrc.match(/\/([a-f0-9]+)\.(?:mp4|webm|mov)/i)?.[1];
+        if (hash && posterMap.has(hash)) return posterMap.get(hash) || '';
+        return '';
+      };
+
+      document.querySelectorAll('video').forEach((node) => {
+        const video = node as HTMLVideoElement;
+        const poster = resolvePoster(video);
+        if (!poster) return;
+        const img = document.createElement('img');
+        img.src = poster;
+        img.alt = video.getAttribute('aria-label') || video.getAttribute('title') || '';
+        img.loading = 'eager';
+        img.decoding = 'sync';
+        const cs = window.getComputedStyle(video);
+        img.style.cssText = [
+          'display:block',
+          'width:100%',
+          'height:100%',
+          'max-width:100%',
+          'object-fit:cover',
+          cs.borderRadius && cs.borderRadius !== '0px' ? `border-radius:${cs.borderRadius}` : '',
+        ].filter(Boolean).join(';');
+        img.setAttribute('data-clonyfy-video-poster', '1');
+        video.replaceWith(img);
+      });
+
+      const findSectionRoot = (needle: string): HTMLElement | null => {
+        const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        const el = [...document.querySelectorAll('h1,h2,h3,h4,p,span,a')].find((n) => re.test(n.textContent || ''));
+        if (!el) return null;
+        return (el.closest('section')
+          || el.closest('[class*="section"]')
+          || el.closest('article')
+          || el.parentElement?.parentElement
+          || el.parentElement) as HTMLElement | null;
+      };
+
+      const isEmptyMediaShell = (el: HTMLElement): boolean => {
+        if (el.closest('nav,header,footer')) return false;
+        if (el.querySelector('img[data-clonyfy-video-poster],img[data-clonyfy-section-fill],video,picture,canvas,iframe')) return false;
+        // Allow shells that only have tiny decorative SVGs/icons.
+        const media = el.querySelectorAll('img');
+        if (media.length > 0) {
+          const hasLarge = [...media].some((img) => {
+            const r = img.getBoundingClientRect();
+            return r.width >= 120 && r.height >= 80;
+          });
+          if (hasLarge) return false;
+        }
+        const r = el.getBoundingClientRect();
+        if (r.width < 180 || r.height < 140) return false;
+        const cs = window.getComputedStyle(el);
+        const radius = parseFloat(cs.borderRadius || '0') || 0;
+        const hasAspect = cs.aspectRatio && cs.aspectRatio !== 'auto';
+        return radius >= 8 || !!hasAspect || r.height >= 220;
+      };
+
+      for (const section of args.sections) {
+        if (!section.images.length) continue;
+        const root = findSectionRoot(section.needle);
+        if (!root) continue;
+        if (root.querySelector('img[data-clonyfy-video-poster],img[data-clonyfy-section-fill]')) continue;
+        const shells = [root, ...Array.from(root.querySelectorAll('div,figure,aside'))]
+          .filter((n) => isEmptyMediaShell(n as HTMLElement)) as HTMLElement[];
+        shells.sort((a, b) => (b.getBoundingClientRect().width * b.getBoundingClientRect().height)
+          - (a.getBoundingClientRect().width * a.getBoundingClientRect().height));
+        const shell = shells[0];
+        if (!shell) continue;
+        const used = new Set(Array.from(root.querySelectorAll('img')).map((img) => (img as HTMLImageElement).currentSrc || (img as HTMLImageElement).src));
+        const pick = section.images.find((u) => !used.has(u)) || section.images[0];
+        if (!pick) continue;
+        const img = document.createElement('img');
+        img.src = pick;
+        img.alt = '';
+        img.loading = 'eager';
+        img.setAttribute('data-clonyfy-section-fill', '1');
+        img.style.cssText = 'display:block;width:100%;height:100%;min-height:220px;object-fit:cover;border-radius:inherit;';
+        shell.appendChild(img);
+      }
+    }, { posters: posterEntries, sections: sectionFillPayload }).catch((err) => {
+      logger.debug(`  [SHOPIFY VIDEO FREEZE WARN] ${(err as Error).message}`);
+    });
+
     await page.waitForFunction(() => {
       const imgs = Array.from(document.querySelectorAll(
-        '[id^="ab-section"] img, [class*="ab-section"] img, section img[src*="cdn.shopify"], main img[src*="cdn.shopify"]',
+        'img[data-clonyfy-video-poster], img[data-clonyfy-section-fill], [id^="ab-section"] img, section img[src*="cdn.shopify"]',
       ));
       if (!imgs.length) return true;
       const ready = imgs.filter((img) => {
         const el = img as HTMLImageElement;
         return el.complete && el.naturalWidth > 0;
       }).length;
-      return ready >= Math.min(imgs.length, Math.max(3, Math.floor(imgs.length * 0.4)));
+      return ready >= Math.min(imgs.length, Math.max(2, Math.floor(imgs.length * 0.35)));
     }, undefined, { timeout: IS_SERVERLESS ? 5_000 : 8_000 }).catch(() => {});
   }
 
