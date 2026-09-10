@@ -764,7 +764,12 @@ export async function crawl(
           }
         }
       } catch (err) {
-        if (IS_SERVERLESS) {
+        const errMsg = (err as Error).message || String(err);
+        logger.warn(`  [SKIP] ${clean}: ${errMsg}`);
+        // Start URL must not silently vanish — always try a static HTML salvage.
+        // Hosted Shopify/marketing pages often OOM or timeout in Playwright.
+        const isStartUrl = !!startNorm && clean === startNorm;
+        if (isStartUrl || IS_SERVERLESS || IS_FAST_CLONE) {
           try {
             logger.info(`  [FALLBACK] Static HTML fetch for ${clean}`);
             const { record, links } = await fetchStaticPage(clean, origin, assetsDir);
@@ -774,10 +779,28 @@ export async function crawl(
               for (const link of links) enqueue(link, currentDepth + 1);
             }
           } catch (fallbackErr) {
-            logger.warn(`  [SKIP] ${clean}: ${(fallbackErr as Error).message}`);
+            logger.warn(`  [FALLBACK FAIL] ${clean}: ${(fallbackErr as Error).message}`);
+            if (isStartUrl) {
+              // One more Playwright retry for the homepage only.
+              try {
+                logger.info(`  [RETRY] Playwright capture for start URL ${clean}`);
+                await context?.close().catch(() => {});
+                context = null;
+                await new Promise((r) => setTimeout(r, 800));
+                context = await browser.newContext({
+                  userAgent: USER_AGENT,
+                  viewport: { width: 1440, height: 900 },
+                  ignoreHTTPSErrors: true,
+                  extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
+                });
+                const retry = await capturePage(context, clean, assetsDir, hooks);
+                records.push(retry.record);
+                await Promise.resolve(onPage(retry.record));
+              } catch (retryErr) {
+                logger.warn(`  [RETRY FAIL] ${clean}: ${(retryErr as Error).message}`);
+              }
+            }
           }
-        } else {
-          logger.warn(`  [SKIP] ${clean}: ${(err as Error).message}`);
         }
       } finally {
         if (startNorm && clean === startNorm) {

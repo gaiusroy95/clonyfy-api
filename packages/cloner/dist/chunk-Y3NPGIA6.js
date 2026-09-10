@@ -4026,7 +4026,10 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
           }
         }
       } catch (err) {
-        if (IS_SERVERLESS) {
+        const errMsg = err.message || String(err);
+        logger.warn(`  [SKIP] ${clean}: ${errMsg}`);
+        const isStartUrl = !!startNorm && clean === startNorm;
+        if (isStartUrl || IS_SERVERLESS || IS_FAST_CLONE) {
           try {
             logger.info(`  [FALLBACK] Static HTML fetch for ${clean}`);
             const { record, links } = await fetchStaticPage(clean, origin, assetsDir);
@@ -4036,10 +4039,28 @@ async function crawl(opts, assetsDir, onPage, hooks = {}) {
               for (const link of links) enqueue(link, currentDepth + 1);
             }
           } catch (fallbackErr) {
-            logger.warn(`  [SKIP] ${clean}: ${fallbackErr.message}`);
+            logger.warn(`  [FALLBACK FAIL] ${clean}: ${fallbackErr.message}`);
+            if (isStartUrl) {
+              try {
+                logger.info(`  [RETRY] Playwright capture for start URL ${clean}`);
+                await context?.close().catch(() => {
+                });
+                context = null;
+                await new Promise((r) => setTimeout(r, 800));
+                context = await browser.newContext({
+                  userAgent: USER_AGENT3,
+                  viewport: { width: 1440, height: 900 },
+                  ignoreHTTPSErrors: true,
+                  extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" }
+                });
+                const retry = await capturePage(context, clean, assetsDir, hooks);
+                records.push(retry.record);
+                await Promise.resolve(onPage(retry.record));
+              } catch (retryErr) {
+                logger.warn(`  [RETRY FAIL] ${clean}: ${retryErr.message}`);
+              }
+            }
           }
-        } else {
-          logger.warn(`  [SKIP] ${clean}: ${err.message}`);
         }
       } finally {
         if (startNorm && clean === startNorm) {
@@ -12724,7 +12745,9 @@ CLONYFY v0.1`);
       const { allowed, reason } = await checkRobots(opts.url);
       logger.info(reason);
       if (!allowed) {
-        throw new Error("Aborted: robots.txt disallows access. Use --ignore-robots to override.");
+        throw new Error(
+          "This site\u2019s robots.txt blocks cloning while \u201CRespect robots.txt\u201D is on. Uncheck it and try again (only if you have permission to capture the site)."
+        );
       }
     } else {
       logger.info("robots.txt check skipped (--ignore-robots)");
@@ -12780,7 +12803,9 @@ CLONYFY v0.1`);
     logger.info(`
 Captured ${records.length} page(s).`);
     if (records.length === 0) {
-      throw new Error("Clone captured 0 pages. The target did not return any readable HTML before the timeout.");
+      throw new Error(
+        "Clone captured 0 pages. The site timed out, blocked the browser session, or returned no HTML. Try again \u2014 for stubborn sites, uncheck \u201CRespect robots.txt\u201D and retry once."
+      );
     }
     logger.info("\n--- Page Summary ---");
     for (const s of rewriteStats) {
@@ -12938,4 +12963,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-3TEIHAHN.js.map
+//# sourceMappingURL=chunk-Y3NPGIA6.js.map

@@ -60,7 +60,9 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
       const { allowed, reason } = await checkRobots(opts.url);
       logger.info(reason);
       if (!allowed) {
-        throw new Error('Aborted: robots.txt disallows access. Use --ignore-robots to override.');
+        throw new Error(
+          'This site’s robots.txt blocks cloning while “Respect robots.txt” is on. Uncheck it and try again (only if you have permission to capture the site).',
+        );
       }
     } else {
       logger.info('robots.txt check skipped (--ignore-robots)');
@@ -123,7 +125,9 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
 
     logger.info(`\nCaptured ${records.length} page(s).`);
     if (records.length === 0) {
-      throw new Error('Clone captured 0 pages. The target did not return any readable HTML before the timeout.');
+      throw new Error(
+        'Clone captured 0 pages. The site timed out, blocked the browser session, or returned no HTML. Try again — for stubborn sites, uncheck “Respect robots.txt” and retry once.',
+      );
     }
 
     logger.info('\n--- Page Summary ---');
