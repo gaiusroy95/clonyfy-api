@@ -2422,218 +2422,222 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     });
     await revealNavDropdownLinks(page);
     if (deepMedia) {
-      await page.waitForTimeout(IS_SERVERLESS2 ? 1800 : 2600).catch(() => {
-      });
-      await page.waitForFunction(() => {
-        const needles = [
-          /Your brand has entered the chat/i,
-          /Sell more in more places/i,
-          /Sell face to face/i
-        ];
-        let foundMedia = 0;
-        for (const re of needles) {
-          const el = [...document.querySelectorAll("h1,h2,h3,h4,p,span")].find((n) => re.test(n.textContent || ""));
-          if (!el) continue;
-          const root = el.closest("section") || el.closest('[class*="section"]') || el.parentElement?.parentElement;
-          if (root && root.querySelector("img,video,picture,source,canvas")) foundMedia++;
-        }
-        const videos = document.querySelectorAll("video").length;
-        const imgs = document.querySelectorAll('img[src*="cdn.shopify"], img[src*="brochure"]').length;
-        return foundMedia >= 1 || videos >= 1 || imgs >= 8;
-      }, void 0, { timeout: IS_SERVERLESS2 ? 6e3 : 1e4 }).catch(() => {
-      });
       try {
-        const hydratedHtml = await page.content();
-        const more = shopifyVideoPosterMap(hydratedHtml);
-        for (const [k, v] of more) videoPosterBySrc.set(k, v);
-        const moreImages = extractShopifyBrochureAssetUrls(hydratedHtml).filter((u) => isShopifyBrochureImageUrl(u));
-        const brochurePending = [];
-        for (const u of moreImages.slice(0, IS_SERVERLESS2 ? 120 : 250)) {
-          if (assetMap.has(u) || shouldSkipAsset(u)) continue;
-          brochurePending.push(async () => {
+        await page.waitForTimeout(IS_SERVERLESS2 ? 1800 : 2600).catch(() => {
+        });
+        await page.waitForFunction(() => {
+          const needles = [
+            /Your brand has entered the chat/i,
+            /Sell more in more places/i,
+            /Sell face to face/i
+          ];
+          let foundMedia = 0;
+          for (const re of needles) {
+            const el = [...document.querySelectorAll("h1,h2,h3,h4,p,span")].find((n) => re.test(n.textContent || ""));
+            if (!el) continue;
+            const root = el.closest("section") || el.closest('[class*="section"]') || el.parentElement?.parentElement;
+            if (root && root.querySelector("img,video,picture,source,canvas")) foundMedia++;
+          }
+          const videos = document.querySelectorAll("video").length;
+          const imgs = document.querySelectorAll('img[src*="cdn.shopify"], img[src*="brochure"]').length;
+          return foundMedia >= 1 || videos >= 1 || imgs >= 8;
+        }, void 0, { timeout: IS_SERVERLESS2 ? 6e3 : 1e4 }).catch(() => {
+        });
+        try {
+          const hydratedHtml = await page.content();
+          const more = shopifyVideoPosterMap(hydratedHtml);
+          for (const [k, v] of more) videoPosterBySrc.set(k, v);
+          const moreImages = extractShopifyBrochureAssetUrls(hydratedHtml).filter((u) => isShopifyBrochureImageUrl(u));
+          const brochurePending = [];
+          for (const u of moreImages.slice(0, IS_SERVERLESS2 ? 120 : 250)) {
+            if (assetMap.has(u) || shouldSkipAsset(u)) continue;
+            brochurePending.push(async () => {
+              try {
+                const absUrl = preferLargestSrcsetCandidate(new URL(decodeHtmlUrl(u), pageUrl).href);
+                if (assetMap.has(absUrl)) return;
+                const r = await fetch(absUrl, {
+                  headers: assetFetchHeaders(pageUrl),
+                  signal: AbortSignal.timeout(IS_SERVERLESS2 ? 8e3 : 15e3)
+                });
+                if (!r.ok) return;
+                const buf = Buffer.from(await r.arrayBuffer());
+                if (buf.length > maxAssetBytes) return;
+                await saveAsset(absUrl, buf, r.headers.get("content-type") || "image/png");
+              } catch {
+              }
+            });
+          }
+          const batch = IS_SERVERLESS2 ? 4 : 10;
+          for (let i = 0; i < brochurePending.length; i += batch) {
+            await Promise.all(brochurePending.slice(i, i + batch).map((fn) => fn()));
+          }
+          if (brochurePending.length) {
+            logger.debug(`  [SHOPIFY BROCHURE] downloaded ${brochurePending.length} still assets after hydrate`);
+          }
+        } catch (err) {
+          logger.debug(`  [SHOPIFY BROCHURE HYDRATE WARN] ${err.message}`);
+        }
+        await page.evaluate(async () => {
+          const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+          const needles = [
+            /Your brand has entered the chat/i,
+            /Sell more in more places/i,
+            /Sell face to face/i,
+            /Put your products where shoppers/i,
+            /Shop app/i,
+            /multichannel/i
+          ];
+          for (const re of needles) {
+            const el = [...document.querySelectorAll("h1,h2,h3,h4,p,span,a")].find((n) => re.test(n.textContent || ""));
+            if (!el) continue;
             try {
-              const absUrl = preferLargestSrcsetCandidate(new URL(decodeHtmlUrl(u), pageUrl).href);
-              if (assetMap.has(absUrl)) return;
-              const r = await fetch(absUrl, {
-                headers: assetFetchHeaders(pageUrl),
-                signal: AbortSignal.timeout(IS_SERVERLESS2 ? 8e3 : 15e3)
-              });
-              if (!r.ok) return;
-              const buf = Buffer.from(await r.arrayBuffer());
-              if (buf.length > maxAssetBytes) return;
-              await saveAsset(absUrl, buf, r.headers.get("content-type") || "image/png");
+              el.scrollIntoView({ block: "center", inline: "nearest" });
             } catch {
             }
-          });
-        }
-        const batch = IS_SERVERLESS2 ? 4 : 10;
-        for (let i = 0; i < brochurePending.length; i += batch) {
-          await Promise.all(brochurePending.slice(i, i + batch).map((fn) => fn()));
-        }
-        if (brochurePending.length) {
-          logger.debug(`  [SHOPIFY BROCHURE] downloaded ${brochurePending.length} still assets after hydrate`);
-        }
-      } catch (err) {
-        logger.debug(`  [SHOPIFY BROCHURE HYDRATE WARN] ${err.message}`);
-      }
-      await page.evaluate(async () => {
-        const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-        const needles = [
-          /Your brand has entered the chat/i,
-          /Sell more in more places/i,
-          /Sell face to face/i,
-          /Put your products where shoppers/i,
-          /Shop app/i,
-          /multichannel/i
-        ];
-        for (const re of needles) {
-          const el = [...document.querySelectorAll("h1,h2,h3,h4,p,span,a")].find((n) => re.test(n.textContent || ""));
-          if (!el) continue;
-          try {
-            el.scrollIntoView({ block: "center", inline: "nearest" });
-          } catch {
+            await delay(350);
           }
-          await delay(350);
-        }
-        window.scrollTo(0, 0);
-      }).catch(() => {
-      });
-      await page.waitForTimeout(IS_SERVERLESS2 ? 900 : 1500).catch(() => {
-      });
-      const posterEntries = [...videoPosterBySrc.entries()];
-      await page.evaluate((posters) => {
-        const posterMap = new Map(posters);
-        const resolvePoster = (video) => {
-          const direct = (video.getAttribute("poster") || "").trim();
-          if (direct && !direct.startsWith("data:")) return direct;
-          const candidates = [
-            video.getAttribute("src") || "",
-            video.currentSrc || "",
-            ...Array.from(video.querySelectorAll("source")).map((s) => s.getAttribute("src") || "")
-          ].filter(Boolean);
-          for (const src of candidates) {
-            if (posterMap.has(src)) return posterMap.get(src) || "";
-            const hash = src.match(/\/([a-f0-9]+)\.(?:mp4|webm|mov)/i)?.[1];
-            if (hash && posterMap.has(hash)) return posterMap.get(hash) || "";
-          }
-          return "";
-        };
-        document.querySelectorAll("video").forEach((node, index) => {
-          const video = node;
-          const poster = resolvePoster(video);
-          if (!poster) {
-            video.setAttribute("data-clonyfy-needs-frame", String(index));
-            return;
-          }
-          const img = document.createElement("img");
-          img.src = poster;
-          img.alt = video.getAttribute("aria-label") || video.getAttribute("title") || "";
-          img.loading = "eager";
-          img.decoding = "sync";
-          const cs = window.getComputedStyle(video);
-          img.style.cssText = [
-            "display:block",
-            "width:100%",
-            "height:100%",
-            "max-width:100%",
-            "object-fit:cover",
-            cs.borderRadius && cs.borderRadius !== "0px" ? `border-radius:${cs.borderRadius}` : ""
-          ].filter(Boolean).join(";");
-          img.setAttribute("data-clonyfy-video-poster", "1");
-          video.replaceWith(img);
+          window.scrollTo(0, 0);
+        }).catch(() => {
         });
-      }, posterEntries).catch((err) => {
-        logger.debug(`  [SHOPIFY VIDEO POSTER WARN] ${err.message}`);
-      });
-      try {
-        const needFrame = page.locator("video[data-clonyfy-needs-frame]");
-        const frameCount = Math.min(await needFrame.count(), IS_SERVERLESS2 ? 6 : 12);
-        for (let i = 0; i < frameCount; i++) {
-          const loc = needFrame.nth(i);
-          try {
-            await loc.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {
-            });
-            await loc.evaluate(async (v) => {
-              const video = v;
-              video.muted = true;
-              video.playsInline = true;
-              video.setAttribute("playsinline", "");
-              try {
-                if (video.readyState < 2) {
+        await page.waitForTimeout(IS_SERVERLESS2 ? 900 : 1500).catch(() => {
+        });
+        const posterEntries = [...videoPosterBySrc.entries()];
+        await page.evaluate((posters) => {
+          const posterMap = new Map(posters);
+          const resolvePoster = (video) => {
+            const direct = (video.getAttribute("poster") || "").trim();
+            if (direct && !direct.startsWith("data:")) return direct;
+            const candidates = [
+              video.getAttribute("src") || "",
+              video.currentSrc || "",
+              ...Array.from(video.querySelectorAll("source")).map((s) => s.getAttribute("src") || "")
+            ].filter(Boolean);
+            for (const src of candidates) {
+              if (posterMap.has(src)) return posterMap.get(src) || "";
+              const hash = src.match(/\/([a-f0-9]+)\.(?:mp4|webm|mov)/i)?.[1];
+              if (hash && posterMap.has(hash)) return posterMap.get(hash) || "";
+            }
+            return "";
+          };
+          document.querySelectorAll("video").forEach((node, index) => {
+            const video = node;
+            const poster = resolvePoster(video);
+            if (!poster) {
+              video.setAttribute("data-clonyfy-needs-frame", String(index));
+              return;
+            }
+            const img = document.createElement("img");
+            img.src = poster;
+            img.alt = video.getAttribute("aria-label") || video.getAttribute("title") || "";
+            img.loading = "eager";
+            img.decoding = "sync";
+            const cs = window.getComputedStyle(video);
+            img.style.cssText = [
+              "display:block",
+              "width:100%",
+              "height:100%",
+              "max-width:100%",
+              "object-fit:cover",
+              cs.borderRadius && cs.borderRadius !== "0px" ? `border-radius:${cs.borderRadius}` : ""
+            ].filter(Boolean).join(";");
+            img.setAttribute("data-clonyfy-video-poster", "1");
+            video.replaceWith(img);
+          });
+        }, posterEntries).catch((err) => {
+          logger.debug(`  [SHOPIFY VIDEO POSTER WARN] ${err.message}`);
+        });
+        try {
+          const needFrame = page.locator("video[data-clonyfy-needs-frame]");
+          const frameCount = Math.min(await needFrame.count(), IS_SERVERLESS2 ? 6 : 12);
+          for (let i = 0; i < frameCount; i++) {
+            const loc = needFrame.nth(i);
+            try {
+              await loc.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {
+              });
+              await loc.evaluate(async (v) => {
+                const video = v;
+                video.muted = true;
+                video.playsInline = true;
+                video.setAttribute("playsinline", "");
+                try {
+                  if (video.readyState < 2) {
+                    await new Promise((resolve3) => {
+                      const done = () => resolve3();
+                      video.addEventListener("loadeddata", done, { once: true });
+                      setTimeout(done, 1200);
+                    });
+                  }
+                  video.currentTime = Math.min(0.35, Number.isFinite(video.duration) ? video.duration * 0.08 : 0.35);
                   await new Promise((resolve3) => {
                     const done = () => resolve3();
-                    video.addEventListener("loadeddata", done, { once: true });
-                    setTimeout(done, 1200);
+                    video.addEventListener("seeked", done, { once: true });
+                    setTimeout(done, 800);
                   });
+                } catch {
                 }
-                video.currentTime = Math.min(0.35, Number.isFinite(video.duration) ? video.duration * 0.08 : 0.35);
-                await new Promise((resolve3) => {
-                  const done = () => resolve3();
-                  video.addEventListener("seeked", done, { once: true });
-                  setTimeout(done, 800);
-                });
-              } catch {
+                try {
+                  await video.play();
+                } catch {
+                }
+                await new Promise((r) => setTimeout(r, 180));
+                try {
+                  video.pause();
+                } catch {
+                }
+              });
+              const buf = await loc.screenshot({ type: "png", timeout: 4e3 });
+              if (!buf || buf.length < 800) continue;
+              if (buf.length > maxAssetBytes) continue;
+              const filename = `video_frame_${hashUrl(`${pageUrl}#video-${i}`)}.png`;
+              const localPath = join3(assetsDir, filename);
+              const webPath = `/_assets/${filename}`;
+              if (!existsSync2(localPath)) {
+                if (!reserveServerlessAssetBytes(buf.length)) continue;
+                writeFileSync2(localPath, buf);
+                assetsSaved++;
+                await notifyArtifactWritten(`public/_assets/${filename}`, localPath);
               }
-              try {
-                await video.play();
-              } catch {
-              }
-              await new Promise((r) => setTimeout(r, 180));
-              try {
-                video.pause();
-              } catch {
-              }
-            });
-            const buf = await loc.screenshot({ type: "png", timeout: 4e3 });
-            if (!buf || buf.length < 800) continue;
-            if (buf.length > maxAssetBytes) continue;
-            const filename = `video_frame_${hashUrl(`${pageUrl}#video-${i}`)}.png`;
-            const localPath = join3(assetsDir, filename);
-            const webPath = `/_assets/${filename}`;
-            if (!existsSync2(localPath)) {
-              if (!reserveServerlessAssetBytes(buf.length)) continue;
-              writeFileSync2(localPath, buf);
-              assetsSaved++;
-              await notifyArtifactWritten(`public/_assets/${filename}`, localPath);
+              assetMap.set(webPath, webPath);
+              await loc.evaluate((v, path) => {
+                const video = v;
+                const img = document.createElement("img");
+                img.src = path;
+                img.alt = video.getAttribute("aria-label") || video.getAttribute("title") || "";
+                img.loading = "eager";
+                img.setAttribute("data-clonyfy-video-frame", "1");
+                const cs = window.getComputedStyle(video);
+                img.style.cssText = [
+                  "display:block",
+                  "width:100%",
+                  "height:100%",
+                  "max-width:100%",
+                  "object-fit:cover",
+                  cs.borderRadius && cs.borderRadius !== "0px" ? `border-radius:${cs.borderRadius}` : ""
+                ].filter(Boolean).join(";");
+                video.replaceWith(img);
+              }, webPath);
+            } catch (err) {
+              logger.debug(`  [SHOPIFY VIDEO FRAME WARN] ${err.message}`);
             }
-            assetMap.set(webPath, webPath);
-            await loc.evaluate((v, path) => {
-              const video = v;
-              const img = document.createElement("img");
-              img.src = path;
-              img.alt = video.getAttribute("aria-label") || video.getAttribute("title") || "";
-              img.loading = "eager";
-              img.setAttribute("data-clonyfy-video-frame", "1");
-              const cs = window.getComputedStyle(video);
-              img.style.cssText = [
-                "display:block",
-                "width:100%",
-                "height:100%",
-                "max-width:100%",
-                "object-fit:cover",
-                cs.borderRadius && cs.borderRadius !== "0px" ? `border-radius:${cs.borderRadius}` : ""
-              ].filter(Boolean).join(";");
-              video.replaceWith(img);
-            }, webPath);
-          } catch (err) {
-            logger.debug(`  [SHOPIFY VIDEO FRAME WARN] ${err.message}`);
           }
+        } catch (err) {
+          logger.debug(`  [SHOPIFY VIDEO FRAME SCAN WARN] ${err.message}`);
         }
-      } catch (err) {
-        logger.debug(`  [SHOPIFY VIDEO FRAME SCAN WARN] ${err.message}`);
+        await page.waitForFunction(() => {
+          const imgs = Array.from(document.querySelectorAll(
+            'img[data-clonyfy-video-poster], img[data-clonyfy-video-frame], section img[src*="cdn.shopify"], main img[src*="cdn.shopify"]'
+          ));
+          if (!imgs.length) return true;
+          const ready = imgs.filter((img) => {
+            const el = img;
+            return el.complete && el.naturalWidth > 0;
+          }).length;
+          return ready >= Math.min(imgs.length, Math.max(2, Math.floor(imgs.length * 0.4)));
+        }, void 0, { timeout: IS_SERVERLESS2 ? 5e3 : 8e3 }).catch(() => {
+        });
+      } catch (deepErr) {
+        logger.warn(`  [SHOPIFY DEEP MEDIA WARN] ${deepErr.message} \u2014 continuing with base snapshot`);
       }
-      await page.waitForFunction(() => {
-        const imgs = Array.from(document.querySelectorAll(
-          'img[data-clonyfy-video-poster], img[data-clonyfy-video-frame], section img[src*="cdn.shopify"], main img[src*="cdn.shopify"]'
-        ));
-        if (!imgs.length) return true;
-        const ready = imgs.filter((img) => {
-          const el = img;
-          return el.complete && el.naturalWidth > 0;
-        }).length;
-        return ready >= Math.min(imgs.length, Math.max(2, Math.floor(imgs.length * 0.4)));
-      }, void 0, { timeout: IS_SERVERLESS2 ? 5e3 : 8e3 }).catch(() => {
-      });
     }
     await page.evaluate(async (fast, carouselSkip, shopifyDeep) => {
       const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -12963,4 +12967,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-Y3NPGIA6.js.map
+//# sourceMappingURL=chunk-A3HDQQ42.js.map

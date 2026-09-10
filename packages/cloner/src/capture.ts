@@ -1442,7 +1442,9 @@ export async function capturePage(
 
   // Shopify brochure sections use Tailwind opacity-0 + delay-500/duration-1000.
   // Give transitions time to finish, hydrate media, freeze videos to posters, then reveal.
+  // Never let this enrichment fail the whole page capture (OOM/timeout → 0 pages).
   if (deepMedia) {
+    try {
     await page.waitForTimeout(IS_SERVERLESS ? 1800 : 2600).catch(() => {});
     // Wait until key marketing sections have some media or timeout.
     await page.waitForFunction(() => {
@@ -1652,6 +1654,9 @@ export async function capturePage(
       }).length;
       return ready >= Math.min(imgs.length, Math.max(2, Math.floor(imgs.length * 0.4)));
     }, undefined, { timeout: IS_SERVERLESS ? 5_000 : 8_000 }).catch(() => {});
+    } catch (deepErr) {
+      logger.warn(`  [SHOPIFY DEEP MEDIA WARN] ${(deepErr as Error).message} — continuing with base snapshot`);
+    }
   }
 
   await page.evaluate(async (fast: boolean, carouselSkip: string, shopifyDeep: boolean) => {
