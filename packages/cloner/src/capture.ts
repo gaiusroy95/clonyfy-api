@@ -178,11 +178,33 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const MAX_ASSET_BYTES = (IS_SERVERLESS ? 4 : 50) * 1024 * 1024; // Cap large media so hosted persist finishes.
 const MAX_CSS_BYTES = (IS_SERVERLESS ? 3 : 25) * 1024 * 1024; // CSS bundles can be larger than media icons/fonts.
 const SERVERLESS_DOM_ASSET_CAP = 220; // Shopify homepage alone has 50+ images + fonts/videos.
+const SHOPIFY_DOM_ASSET_CAP = 480; // Marketing/brochure pages ship many CDN images + videos.
 // Upper bound on CSS we scan for url()/image-set()/@import references. The old
 // 500KB limit silently skipped ref-extraction for big bundles (Tailwind/CMS CSS
 // routinely exceeds it), so fonts and background images they referenced never
 // downloaded. 4MB covers virtually all real stylesheets while bounding regex cost.
 const CSS_REF_SCAN_MAX_BYTES = 4 * 1024 * 1024;
+
+function isShopifyLikeHost(hostname: string): boolean {
+  const h = String(hostname || '').toLowerCase();
+  return (
+    h === 'shopify.com'
+    || h === 'www.shopify.com'
+    || h.endsWith('.shopify.com')
+    || h.endsWith('.myshopify.com')
+    || h === 'cdn.shopify.com'
+    || h.includes('shopifycdn')
+    || h.endsWith('.shopifycloud.com')
+  );
+}
+
+function pageNeedsDeepMediaCapture(pageUrl: string): boolean {
+  try {
+    return isShopifyLikeHost(new URL(pageUrl).hostname);
+  } catch {
+    return /shopify\.com|myshopify\.com/i.test(pageUrl);
+  }
+}
 
 function hashUrl(url: string): string {
   return createHash('sha1').update(url).digest('hex').slice(0, 16);
@@ -207,19 +229,30 @@ function decodeHtmlUrl(value: string): string {
     .trim();
 }
 
+/**
+ * Prefer a display-quality Shopify CDN URL without requesting the multi‑MB original.
+ * Only rewrite when resize params already exist — bare brochure assets keep their path.
+ */
 function preferLargestSrcsetCandidate(url: string): string {
-  // Prefer the bare CDN file (or largest width) when we see Shopify/CDN resize params.
   try {
     const u = new URL(url);
     if (!/cdn\.shopify\.com$/i.test(u.hostname)
-      && !/shopifycdn|shopifycloud|myshopify/i.test(u.hostname)) {
+      && !/shopifycdn|shopifycloud|myshopify/i.test(u.hostname)
+      && !/\.shopify\.com$/i.test(u.hostname)) {
       return url;
     }
-    // Drop width/height resize params so one file covers all srcset variants.
-    u.searchParams.delete('width');
+    if (!u.searchParams.has('width') && !u.searchParams.has('height')) {
+      return url;
+    }
+    const widthRaw = u.searchParams.get('width');
+    const width = widthRaw ? Number(widthRaw) : NaN;
     u.searchParams.delete('height');
     u.searchParams.delete('crop');
-    u.searchParams.delete('quality');
+    // Keep a bounded width so clones stay under the hosted media cap.
+    if (!Number.isFinite(width) || width < 1200 || width > 2000) {
+      u.searchParams.set('width', '1600');
+    }
+    if (!u.searchParams.has('quality')) u.searchParams.set('quality', '80');
     return u.href;
   } catch {
     return url;
@@ -356,6 +389,15 @@ export async function capturePage(
   hooks: CaptureHooks = {},
 ): Promise<{ record: PageRecord; links: string[] }> {
   ensurePlaceholderAsset(assetsDir);
+  const deepMedia = pageNeedsDeepMediaCapture(pageUrl);
+  // Shopify marketing pages need deeper scroll/lazy harvest even on hosted fast clones.
+  const fastScroll = IS_SERVERLESS && !deepMedia;
+  const domAssetCap = deepMedia
+    ? (IS_SERVERLESS ? SHOPIFY_DOM_ASSET_CAP : 900)
+    : (IS_SERVERLESS ? SERVERLESS_DOM_ASSET_CAP : Infinity);
+  const maxAssetBytes = deepMedia && IS_SERVERLESS
+    ? Math.max(MAX_ASSET_BYTES, 8 * 1024 * 1024)
+    : MAX_ASSET_BYTES;
   const page = await context.newPage();
   await page.setExtraHTTPHeaders({
     'User-Agent': USER_AGENT,
@@ -364,6 +406,47 @@ export async function capturePage(
   await page.addInitScript(() => {
     const win = window as Window & { __name?: <T>(value: T) => T };
     win.__name ||= (value) => value;
+  });
+  // Shopify (and many brochure sites) gate images behind IntersectionObserver.
+  // Force every observation to report intersecting so lazy loaders populate src
+  // before we snapshot HTML.
+  await page.addInitScript(() => {
+    try {
+      const IO = window.IntersectionObserver;
+      if (!IO) return;
+      window.IntersectionObserver = class ForcedIntersectingObserver {
+        readonly root: Element | Document | null = null;
+        readonly rootMargin = '0px';
+        readonly thresholds: ReadonlyArray<number> = [0];
+        private readonly cb: IntersectionObserverCallback;
+        constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+          this.cb = callback;
+          this.root = (options?.root as Element | Document | null) ?? null;
+          this.rootMargin = options?.rootMargin || '0px';
+          this.thresholds = options?.threshold == null
+            ? [0]
+            : Array.isArray(options.threshold) ? options.threshold : [options.threshold];
+        }
+        observe(target: Element) {
+          const rect = target.getBoundingClientRect();
+          const entry = {
+            time: performance.now(),
+            target,
+            isIntersecting: true,
+            intersectionRatio: 1,
+            boundingClientRect: rect,
+            intersectionRect: rect,
+            rootBounds: null,
+          } as IntersectionObserverEntry;
+          queueMicrotask(() => {
+            try { this.cb([entry], this as unknown as IntersectionObserver); } catch { /* ignore site handler errors */ }
+          });
+        }
+        unobserve() {}
+        disconnect() {}
+        takeRecords(): IntersectionObserverEntry[] { return []; }
+      } as unknown as typeof IntersectionObserver;
+    } catch { /* ignore */ }
   });
 
   const networkLog: NetworkEntry[] = [];
@@ -424,7 +507,7 @@ export async function capturePage(
 
   async function saveAsset(url: string, body: Buffer, contentType: string, forceCss = false): Promise<string | null> {
     if (shouldSkipAsset(url)) return null;
-    const maxBytes = (forceCss || contentType.includes('text/css')) ? MAX_CSS_BYTES : MAX_ASSET_BYTES;
+    const maxBytes = (forceCss || contentType.includes('text/css')) ? MAX_CSS_BYTES : maxAssetBytes;
     if (body.length > maxBytes) {
       logger.debug(`  [ASSET SKIP] ${url} - too large (${(body.length / 1024 / 1024).toFixed(1)}MB > ${(maxBytes / 1024 / 1024).toFixed(0)}MB)`);
       return null;
@@ -511,7 +594,7 @@ export async function capturePage(
           const contentType = r.headers.get('content-type') ?? '';
           const pathExt = extname(new URL(absUrl.split('?')[0]).pathname).toLowerCase();
           const isCssRef = contentType.includes('text/css') || pathExt === '.css';
-          const maxBytes = isCssRef ? MAX_CSS_BYTES : MAX_ASSET_BYTES;
+          const maxBytes = isCssRef ? MAX_CSS_BYTES : maxAssetBytes;
           const len = Number(r.headers.get('content-length') || 0);
           if (len > maxBytes) {
             logger.debug(`  [CSS REF SKIP] ${absUrl} - too large (${(len / 1024 / 1024).toFixed(1)}MB > ${(maxBytes / 1024 / 1024).toFixed(0)}MB)`);
@@ -604,7 +687,7 @@ export async function capturePage(
       // absolute CDN URL in HTML so preview can still load the live image.
       if (isLiveCdnMediaUrl(url)) {
         logger.debug(`  [CDN IMAGE KEEP] ${url} -> HTTP ${status} (keeping live URL)`);
-        await route.abort().catch(() => {});
+        await route.fulfill({ response }).catch(async () => { await route.abort().catch(() => {}); });
         return;
       }
       failedAssets.add(url);
@@ -661,7 +744,7 @@ export async function capturePage(
     if (isAsset && status === 200) {
       assetsIntercepted++;
       try {
-        const maxBytes = isCss ? MAX_CSS_BYTES : MAX_ASSET_BYTES;
+        const maxBytes = isCss ? MAX_CSS_BYTES : maxAssetBytes;
         const len = Number(response.headers()['content-length'] || 0);
         if (len > maxBytes) {
           logger.debug(`  [ASSET SKIP] ${url} - too large (${(len / 1024 / 1024).toFixed(1)}MB > ${(maxBytes / 1024 / 1024).toFixed(0)}MB)`);
@@ -698,7 +781,9 @@ export async function capturePage(
     }
     logger.debug(`  [NAV] load fired for ${pageUrl}`);
     // Wait for networkidle - aborted beacon patterns above help this settle quickly
-    await page.waitForLoadState('networkidle', { timeout: IS_SERVERLESS ? 2_000 : 15_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', {
+      timeout: deepMedia ? (IS_SERVERLESS ? 8_000 : 15_000) : (IS_SERVERLESS ? 2_000 : 15_000),
+    }).catch(() => {});
     logger.debug(`  [NAV] networkidle settled for ${pageUrl}`);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -712,32 +797,62 @@ export async function capturePage(
 
   // Scroll to trigger lazy-loaded images and content.
   // Re-check scrollHeight each step - some sites (infinite scroll, lazy sections) grow the page as you scroll.
+  // Shopify brochure sections mount per-section IO — use deeper scroll even on hosted.
   await page.evaluate(async (fast: boolean) => {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    const step = Math.max(window.innerHeight, 400);
+    const step = Math.max(Math.floor(window.innerHeight * 0.7), 320);
     const started = Date.now();
-    const maxSteps = fast ? 12 : 28;
+    const maxSteps = fast ? 12 : 40;
+    const maxMs = fast ? 2_500 : 12_000;
     let y = 0;
     let steps = 0;
-    while (y < document.body.scrollHeight && steps < maxSteps && Date.now() - started < (fast ? 2_500 : 6_000)) {
+    while (y < document.body.scrollHeight && steps < maxSteps && Date.now() - started < maxMs) {
       window.scrollTo(0, y);
-      await delay(fast ? 50 : 80);
+      await delay(fast ? 50 : 90);
       y += step;
       steps++;
     }
     window.scrollTo(0, document.body.scrollHeight);
-    await delay(fast ? 40 : 120);
+    await delay(fast ? 40 : 150);
+    // Second pass upward helps sticky/reveal sections that only mount once.
+    y = document.body.scrollHeight;
+    while (y > 0 && steps < maxSteps + 10 && Date.now() - started < maxMs) {
+      y -= step;
+      window.scrollTo(0, Math.max(0, y));
+      await delay(fast ? 30 : 60);
+      steps++;
+    }
     window.scrollTo(0, 0);
-  }, IS_SERVERLESS).catch((err) => {
+  }, fastScroll).catch((err) => {
     logger.debug(`  [SCROLL WARN] ${(err as Error).message}`);
+  });
+
+  // Force below-fold lazy nodes into view so custom loaders populate src/srcset.
+  await page.evaluate(async (budget: { maxNodes: number; pauseMs: number }) => {
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const nodes = Array.from(document.querySelectorAll(
+      'img[loading="lazy"],img[data-src],img[data-srcset],source[data-srcset],source[srcset],picture,video[poster],video[data-src],[data-bg],[data-background],[data-bg-image],[data-lazy-background],[style*="background"]',
+    )).slice(0, budget.maxNodes);
+    for (const el of nodes) {
+      try {
+        (el as HTMLElement).scrollIntoView({ block: 'center', inline: 'nearest' });
+      } catch { /* ignore */ }
+      await delay(budget.pauseMs);
+    }
+    window.scrollTo(0, 0);
+  }, {
+    maxNodes: deepMedia ? (IS_SERVERLESS ? 80 : 160) : (IS_SERVERLESS ? 24 : 60),
+    pauseMs: deepMedia ? (IS_SERVERLESS ? 35 : 50) : (IS_SERVERLESS ? 15 : 30),
+  }).catch((err) => {
+    logger.debug(`  [SCROLLINTOVIEW WARN] ${(err as Error).message}`);
   });
 
   // Wait for lazy images to finish loading
   try {
     await page.waitForFunction(() => {
-      const imgs = Array.from(document.querySelectorAll('img[loading="lazy"], img[data-src]'));
+      const imgs = Array.from(document.querySelectorAll('img[loading="lazy"], img[data-src], img[data-srcset], img[srcset]'));
       return imgs.every((img) => (img as HTMLImageElement).complete);
-    }, undefined, { timeout: IS_SERVERLESS ? 600 : 2_000 });
+    }, undefined, { timeout: deepMedia ? (IS_SERVERLESS ? 3_000 : 5_000) : (IS_SERVERLESS ? 600 : 2_000) });
   } catch { /* timeout is fine */ }
 
   // Some sites keep images/videos only in lazy data-* attributes until custom JS runs.
@@ -748,12 +863,16 @@ export async function capturePage(
       if (!value) return;
       let v = value.trim();
       if (!v || v.startsWith('#')) return;
+      // Shopify data-widths is often JSON like [180,360,540] — not a URL list.
+      if (/^\s*\[/.test(v) && !/^https?:/i.test(v)) return;
       v = v.replace(/&amp;/gi, '&').replace(/&quot;/gi, '"');
       urls.push(v);
     };
     const pushSrcset = (value: string | null) => {
       if (!value) return;
-      for (const part of value.split(',')) {
+      const trimmed = value.trim();
+      if (/^\s*\[/.test(trimmed) && !/https?:/i.test(trimmed)) return;
+      for (const part of trimmed.split(',')) {
         const url = part.trim().split(/\s+/)[0];
         push(url);
       }
@@ -767,10 +886,10 @@ export async function capturePage(
       ]) {
         push(el.getAttribute(attr));
       }
-      for (const attr of ['srcset', 'data-srcset', 'data-lazy-srcset', 'data-widths', 'imagesrcset']) {
+      // Never treat data-widths as srcset (Shopify widths JSON).
+      for (const attr of ['srcset', 'data-srcset', 'data-lazy-srcset', 'imagesrcset']) {
         pushSrcset(el.getAttribute(attr));
       }
-      // React SSR often serializes as srcSet (camelCase) — getAttribute is case-insensitive in HTML
       pushSrcset(el.getAttribute('srcSet'));
     });
 
@@ -780,6 +899,20 @@ export async function capturePage(
         push(match[2]);
       }
     });
+
+    // Class-driven backgrounds (computed) — critical for Shopify brochure cards.
+    try {
+      const nodes = Array.from(document.querySelectorAll('section,article,div,li,figure,a,header,main'));
+      let scanned = 0;
+      for (const el of nodes) {
+        if (scanned++ > 400) break;
+        const bg = window.getComputedStyle(el).backgroundImage;
+        if (!bg || bg === 'none') continue;
+        for (const match of bg.matchAll(/url\(\s*(['"]?)([^'")\s]+)\1\s*\)/gi)) {
+          push(match[2]);
+        }
+      }
+    } catch { /* ignore */ }
 
     document.querySelectorAll('link[href]').forEach((el) => {
       const rel = (el.getAttribute('rel') ?? '').toLowerCase();
@@ -809,11 +942,11 @@ export async function capturePage(
   )];
 
   if (domAssetUrls.length > 0) {
-    logger.debug(`  [DOM ASSETS] ${domAssetUrls.length} lazy/data asset refs found`);
+    logger.debug(`  [DOM ASSETS] ${domAssetUrls.length} lazy/data asset refs found${deepMedia ? ' (shopify deep)' : ''}`);
   }
 
-  const domAssetUrlsToFetch = IS_SERVERLESS
-    ? [...domAssetUrls].sort((a, b) => domAssetUrlScore(b) - domAssetUrlScore(a)).slice(0, SERVERLESS_DOM_ASSET_CAP)
+  const domAssetUrlsToFetch = Number.isFinite(domAssetCap)
+    ? [...domAssetUrls].sort((a, b) => domAssetUrlScore(b) - domAssetUrlScore(a)).slice(0, domAssetCap as number)
     : domAssetUrls;
   for (const u of domAssetUrlsToFetch) {
     if (!assetMap.has(u) && !shouldSkipAsset(u) && !ABORT_PATTERNS.some((p) => p.test(u))) {
@@ -836,11 +969,15 @@ export async function capturePage(
               return;
             }
             const len = Number(r.headers.get('content-length') || 0);
-            if (len > MAX_ASSET_BYTES) {
-              logger.debug(`  [DOM ASSET SKIP] ${absUrl} - too large (${(len / 1024 / 1024).toFixed(1)}MB > ${(MAX_ASSET_BYTES / 1024 / 1024).toFixed(0)}MB)`);
+            if (len > maxAssetBytes) {
+              logger.debug(`  [DOM ASSET SKIP] ${absUrl} - too large (${(len / 1024 / 1024).toFixed(1)}MB > ${(maxAssetBytes / 1024 / 1024).toFixed(0)}MB)`);
               return;
             }
             const buf = Buffer.from(await r.arrayBuffer());
+            if (buf.length > maxAssetBytes) {
+              logger.debug(`  [DOM ASSET SKIP] ${absUrl} - body too large`);
+              return;
+            }
             await saveAsset(absUrl, buf, contentType);
           } else if (r.status >= 400 && r.status < 500) {
             // Only mark definitive client errors as failed (not timeouts / 5xx).
@@ -885,7 +1022,9 @@ export async function capturePage(
     logger.debug(`  [INLINE CSS] ${inlineStyleUrls.length} url() refs in inline styles`);
   }
 
-  const inlineStyleUrlsToFetch = IS_SERVERLESS ? inlineStyleUrls.slice(0, 40) : inlineStyleUrls;
+  const inlineStyleUrlsToFetch = IS_SERVERLESS
+    ? inlineStyleUrls.slice(0, deepMedia ? 120 : 40)
+    : inlineStyleUrls;
   for (const u of inlineStyleUrlsToFetch) {
     if (!assetMap.has(u) && !shouldSkipAsset(u) && !ABORT_PATTERNS.some((p) => p.test(u))) {
       pendingAssets.push(async () => {
@@ -903,8 +1042,8 @@ export async function capturePage(
               return;
             }
             const len = Number(r.headers.get('content-length') || 0);
-            if (len > MAX_ASSET_BYTES) {
-              logger.debug(`  [INLINE CSS SKIP] ${absUrl} - too large (${(len / 1024 / 1024).toFixed(1)}MB > ${(MAX_ASSET_BYTES / 1024 / 1024).toFixed(0)}MB)`);
+            if (len > maxAssetBytes) {
+              logger.debug(`  [INLINE CSS SKIP] ${absUrl} - too large (${(len / 1024 / 1024).toFixed(1)}MB > ${(maxAssetBytes / 1024 / 1024).toFixed(0)}MB)`);
               return;
             }
             const buf = Buffer.from(await r.arrayBuffer());
@@ -1033,7 +1172,7 @@ export async function capturePage(
     )];
     domAssetUrls = [...new Set([...domAssetUrls, ...normalizedMore])];
     const extraToFetch = IS_SERVERLESS
-      ? normalizedMore.sort((a, b) => domAssetUrlScore(b) - domAssetUrlScore(a)).slice(0, 80)
+      ? normalizedMore.sort((a, b) => domAssetUrlScore(b) - domAssetUrlScore(a)).slice(0, deepMedia ? 160 : 80)
       : normalizedMore;
     const postInteractAssets: Array<() => Promise<void>> = [];
     for (const u of extraToFetch) {
@@ -1053,7 +1192,7 @@ export async function capturePage(
               const contentType = r.headers.get('content-type') ?? '';
               if (contentType.includes('text/html')) return;
               const len = Number(r.headers.get('content-length') || 0);
-              if (len > MAX_ASSET_BYTES) return;
+              if (len > maxAssetBytes) return;
               const buf = Buffer.from(await r.arrayBuffer());
               await saveAsset(absUrl, buf, contentType);
             } else if (r.status >= 400 && r.status < 500) {
@@ -1114,8 +1253,8 @@ export async function capturePage(
       const realSrc = firstAttr(el, ['data-src', 'data-lazy-src', 'data-original', 'data-url', 'data-master']);
       const currentSrc = el.getAttribute('src');
       if (realSrc && (isPlaceholder(currentSrc) || isLowRes(currentSrc))) el.setAttribute('src', realSrc);
-      const realSrcset = firstAttr(el, ['data-srcset', 'data-lazy-srcset', 'data-widths']);
-      if (realSrcset && (!el.getAttribute('srcset') || isPlaceholder(currentSrc) || isLowRes(currentSrc))) {
+      const realSrcset = firstAttr(el, ['data-srcset', 'data-lazy-srcset']);
+      if (realSrcset && !/^\s*\[/.test(realSrcset) && (!el.getAttribute('srcset') || isPlaceholder(currentSrc) || isLowRes(currentSrc))) {
         el.setAttribute('srcset', realSrcset);
       }
       if (el.getAttribute('loading') === 'lazy') el.setAttribute('loading', 'eager');
@@ -1145,8 +1284,71 @@ export async function capturePage(
         if (src?.startsWith('data:')) return true;
         return el.complete && el.naturalWidth > 0;
       });
-    }, undefined, { timeout: IS_SERVERLESS ? 4_000 : 10_000 });
+    }, undefined, { timeout: deepMedia ? (IS_SERVERLESS ? 8_000 : 12_000) : (IS_SERVERLESS ? 4_000 : 10_000) });
   } catch { /* partial load is still better than an empty snapshot */ }
+
+  // Rasterize large canvas/WebGL visuals (e.g. Shopify globe) into <img> so static HTML keeps them.
+  if (deepMedia) {
+    try {
+      const canvasPayloads = await page.evaluate((limit: number) => {
+        const out: Array<{ dataUrl: string; width: number; height: number; replaceId: string }> = [];
+        const canvases = Array.from(document.querySelectorAll('canvas'));
+        for (const canvas of canvases) {
+          if (out.length >= limit) break;
+          const el = canvas as HTMLCanvasElement;
+          const rect = el.getBoundingClientRect();
+          const w = el.width || Math.round(rect.width);
+          const h = el.height || Math.round(rect.height);
+          if (w < 80 || h < 80) continue;
+          try {
+            const dataUrl = el.toDataURL('image/png');
+            if (!dataUrl || dataUrl.length < 1000) continue;
+            const replaceId = `clonyfy-canvas-${out.length}-${Date.now()}`;
+            el.setAttribute('data-clonyfy-canvas-id', replaceId);
+            out.push({ dataUrl, width: w, height: h, replaceId });
+          } catch {
+            /* tainted canvas — skip */
+          }
+        }
+        return out;
+      }, IS_SERVERLESS ? 4 : 8);
+
+      for (const item of canvasPayloads) {
+        try {
+          const base64 = item.dataUrl.replace(/^data:image\/png;base64,/, '');
+          const buf = Buffer.from(base64, 'base64');
+          if (buf.length > maxAssetBytes) continue;
+          const filename = `canvas_${hashUrl(item.replaceId)}.png`;
+          const localPath = join(assetsDir, filename);
+          const webPath = `/_assets/${filename}`;
+          if (!existsSync(localPath)) {
+            if (!reserveServerlessAssetBytes(buf.length)) continue;
+            writeFileSync(localPath, buf);
+            assetsSaved++;
+            await notifyArtifactWritten(`public/_assets/${filename}`, localPath);
+          }
+          assetMap.set(webPath, webPath);
+          await page.evaluate(({ replaceId, webPath, width, height }) => {
+            const canvas = document.querySelector(`canvas[data-clonyfy-canvas-id="${replaceId}"]`);
+            if (!canvas || !canvas.parentElement) return;
+            const img = document.createElement('img');
+            img.src = webPath;
+            img.width = width;
+            img.height = height;
+            img.alt = '';
+            img.setAttribute('data-clonyfy-canvas-capture', '1');
+            const style = window.getComputedStyle(canvas);
+            img.style.cssText = `display:block;width:${style.width || width + 'px'};height:${style.height || height + 'px'};max-width:100%;`;
+            canvas.replaceWith(img);
+          }, { replaceId: item.replaceId, webPath, width: item.width, height: item.height });
+        } catch (err) {
+          logger.debug(`  [CANVAS CAPTURE WARN] ${(err as Error).message}`);
+        }
+      }
+    } catch (err) {
+      logger.debug(`  [CANVAS SCAN WARN] ${(err as Error).message}`);
+    }
+  }
 
   // Freeze Next.js <Image> fill layouts for static HTML. Without hydration the
   // absolute-positioned img can collapse when parent dimensions are unset.
@@ -1260,7 +1462,7 @@ export async function capturePage(
       const transform = style.transform || cs.transform;
       if (shouldResetTransform(transform)) style.transform = 'none';
     });
-  }, IS_SERVERLESS, CAROUSEL_SKIP_SELECTOR).catch((err) => {
+  }, fastScroll, CAROUSEL_SKIP_SELECTOR).catch((err) => {
     logger.debug(`  [VISIBILITY FREEZE WARN] ${(err as Error).message}`);
   });
 
