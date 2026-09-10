@@ -1463,7 +1463,7 @@ export async function capturePage(
       return foundMedia >= 1 || videos >= 1 || imgs >= 8;
     }, undefined, { timeout: IS_SERVERLESS ? 6_000 : 10_000 }).catch(() => {});
 
-    // Refresh poster map after hydration may have rewritten the DOM, and download stills.
+    // Refresh poster map + download stills referenced by hydrated DOM (not guessed fills).
     try {
       const hydratedHtml = await page.content();
       const more = shopifyVideoPosterMap(hydratedHtml);
@@ -1492,64 +1492,63 @@ export async function capturePage(
         await Promise.all(brochurePending.slice(i, i + batch).map((fn) => fn()));
       }
       if (brochurePending.length) {
-        logger.debug(`  [SHOPIFY BROCHURE] downloaded/queued ${brochurePending.length} still assets after hydrate`);
+        logger.debug(`  [SHOPIFY BROCHURE] downloaded ${brochurePending.length} still assets after hydrate`);
       }
     } catch (err) {
       logger.debug(`  [SHOPIFY BROCHURE HYDRATE WARN] ${(err as Error).message}`);
     }
 
-    const posterEntries = [...videoPosterBySrc.entries()];
-    // Section-scoped stills from the original HTML payload (better than global candidates).
-    let sectionFillPayload: Array<{ needle: string; images: string[] }> = [];
-    try {
-      const htmlForSections = await page.content();
-      const decoded = htmlForSections.replace(/\\u0026/g, '&').replace(/&amp;/gi, '&');
-      const sectionNeedles = [
-        'Your brand has entered the chat',
-        'Sell more in more places',
-        'Sell face to face',
-        'Put your products where shoppers',
-        'Shop app',
+    // Scroll key marketing sections into view so React can mount the real media.
+    await page.evaluate(async () => {
+      const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      const needles = [
+        /Your brand has entered the chat/i,
+        /Sell more in more places/i,
+        /Sell face to face/i,
+        /Put your products where shoppers/i,
+        /Shop app/i,
+        /multichannel/i,
       ];
-      sectionFillPayload = sectionNeedles.map((needle) => {
-        const i = decoded.indexOf(needle);
-        if (i < 0) return { needle, images: [] as string[] };
-        const slice = decoded.slice(Math.max(0, i - 1500), i + 9000);
-        const images = extractShopifyBrochureAssetUrls(slice)
-          .filter((u) => isShopifyBrochureImageUrl(u) && /\.(?:png|jpe?g|webp)(?:\?|$)/i.test(u));
-        // Prefer large marketing stills over tiny icons/logos.
-        const ranked = [...new Set(images)].sort((a, b) => {
-          const wa = Number(a.match(/originalWidth=(\d+)/i)?.[1] || 0);
-          const wb = Number(b.match(/originalWidth=(\d+)/i)?.[1] || 0);
-          return wb - wa;
-        });
-        return { needle, images: ranked.slice(0, 8) };
-      });
-    } catch { /* ignore */ }
+      for (const re of needles) {
+        const el = [...document.querySelectorAll('h1,h2,h3,h4,p,span,a')].find((n) => re.test(n.textContent || ''));
+        if (!el) continue;
+        try {
+          (el as HTMLElement).scrollIntoView({ block: 'center', inline: 'nearest' });
+        } catch { /* ignore */ }
+        await delay(350);
+      }
+      window.scrollTo(0, 0);
+    }).catch(() => {});
+    await page.waitForTimeout(IS_SERVERLESS ? 900 : 1500).catch(() => {});
 
-    await page.evaluate((args: { posters: Array<[string, string]>; sections: Array<{ needle: string; images: string[] }> }) => {
-      const posterMap = new Map(args.posters);
+    // Freeze ONLY real videos: prefer site poster attr, else matched poster by source URL,
+    // else screenshot the live video frame. Never invent/guess section images.
+    const posterEntries = [...videoPosterBySrc.entries()];
+    await page.evaluate((posters: Array<[string, string]>) => {
+      const posterMap = new Map(posters);
       const resolvePoster = (video: HTMLVideoElement): string => {
         const direct = (video.getAttribute('poster') || '').trim();
-        if (direct) return direct;
-        for (const source of Array.from(video.querySelectorAll('source'))) {
-          const src = source.getAttribute('src') || '';
-          if (!src) continue;
+        if (direct && !direct.startsWith('data:')) return direct;
+        const candidates = [
+          video.getAttribute('src') || '',
+          video.currentSrc || '',
+          ...Array.from(video.querySelectorAll('source')).map((s) => s.getAttribute('src') || ''),
+        ].filter(Boolean);
+        for (const src of candidates) {
           if (posterMap.has(src)) return posterMap.get(src) || '';
           const hash = src.match(/\/([a-f0-9]+)\.(?:mp4|webm|mov)/i)?.[1];
           if (hash && posterMap.has(hash)) return posterMap.get(hash) || '';
         }
-        const vsrc = video.getAttribute('src') || video.currentSrc || '';
-        if (vsrc && posterMap.has(vsrc)) return posterMap.get(vsrc) || '';
-        const hash = vsrc.match(/\/([a-f0-9]+)\.(?:mp4|webm|mov)/i)?.[1];
-        if (hash && posterMap.has(hash)) return posterMap.get(hash) || '';
         return '';
       };
 
-      document.querySelectorAll('video').forEach((node) => {
+      document.querySelectorAll('video').forEach((node, index) => {
         const video = node as HTMLVideoElement;
         const poster = resolvePoster(video);
-        if (!poster) return;
+        if (!poster) {
+          video.setAttribute('data-clonyfy-needs-frame', String(index));
+          return;
+        }
         const img = document.createElement('img');
         img.src = poster;
         img.alt = video.getAttribute('aria-label') || video.getAttribute('title') || '';
@@ -1567,74 +1566,91 @@ export async function capturePage(
         img.setAttribute('data-clonyfy-video-poster', '1');
         video.replaceWith(img);
       });
-
-      const findSectionRoot = (needle: string): HTMLElement | null => {
-        const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-        const el = [...document.querySelectorAll('h1,h2,h3,h4,p,span,a')].find((n) => re.test(n.textContent || ''));
-        if (!el) return null;
-        return (el.closest('section')
-          || el.closest('[class*="section"]')
-          || el.closest('article')
-          || el.parentElement?.parentElement
-          || el.parentElement) as HTMLElement | null;
-      };
-
-      const isEmptyMediaShell = (el: HTMLElement): boolean => {
-        if (el.closest('nav,header,footer')) return false;
-        if (el.querySelector('img[data-clonyfy-video-poster],img[data-clonyfy-section-fill],video,picture,canvas,iframe')) return false;
-        // Allow shells that only have tiny decorative SVGs/icons.
-        const media = el.querySelectorAll('img');
-        if (media.length > 0) {
-          const hasLarge = [...media].some((img) => {
-            const r = img.getBoundingClientRect();
-            return r.width >= 120 && r.height >= 80;
-          });
-          if (hasLarge) return false;
-        }
-        const r = el.getBoundingClientRect();
-        if (r.width < 180 || r.height < 140) return false;
-        const cs = window.getComputedStyle(el);
-        const radius = parseFloat(cs.borderRadius || '0') || 0;
-        const hasAspect = cs.aspectRatio && cs.aspectRatio !== 'auto';
-        return radius >= 8 || !!hasAspect || r.height >= 220;
-      };
-
-      for (const section of args.sections) {
-        if (!section.images.length) continue;
-        const root = findSectionRoot(section.needle);
-        if (!root) continue;
-        if (root.querySelector('img[data-clonyfy-video-poster],img[data-clonyfy-section-fill]')) continue;
-        const shells = [root, ...Array.from(root.querySelectorAll('div,figure,aside'))]
-          .filter((n) => isEmptyMediaShell(n as HTMLElement)) as HTMLElement[];
-        shells.sort((a, b) => (b.getBoundingClientRect().width * b.getBoundingClientRect().height)
-          - (a.getBoundingClientRect().width * a.getBoundingClientRect().height));
-        const shell = shells[0];
-        if (!shell) continue;
-        const used = new Set(Array.from(root.querySelectorAll('img')).map((img) => (img as HTMLImageElement).currentSrc || (img as HTMLImageElement).src));
-        const pick = section.images.find((u) => !used.has(u)) || section.images[0];
-        if (!pick) continue;
-        const img = document.createElement('img');
-        img.src = pick;
-        img.alt = '';
-        img.loading = 'eager';
-        img.setAttribute('data-clonyfy-section-fill', '1');
-        img.style.cssText = 'display:block;width:100%;height:100%;min-height:220px;object-fit:cover;border-radius:inherit;';
-        shell.appendChild(img);
-      }
-    }, { posters: posterEntries, sections: sectionFillPayload }).catch((err) => {
-      logger.debug(`  [SHOPIFY VIDEO FREEZE WARN] ${(err as Error).message}`);
+    }, posterEntries).catch((err) => {
+      logger.debug(`  [SHOPIFY VIDEO POSTER WARN] ${(err as Error).message}`);
     });
+
+    // Screenshot remaining live videos (actual frame from the real site — not a random asset).
+    try {
+      const needFrame = page.locator('video[data-clonyfy-needs-frame]');
+      const frameCount = Math.min(await needFrame.count(), IS_SERVERLESS ? 6 : 12);
+      for (let i = 0; i < frameCount; i++) {
+        const loc = needFrame.nth(i);
+        try {
+          await loc.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+          await loc.evaluate(async (v) => {
+            const video = v as HTMLVideoElement;
+            video.muted = true;
+            video.playsInline = true;
+            video.setAttribute('playsinline', '');
+            try {
+              if (video.readyState < 2) {
+                await new Promise<void>((resolve) => {
+                  const done = () => resolve();
+                  video.addEventListener('loadeddata', done, { once: true });
+                  setTimeout(done, 1200);
+                });
+              }
+              video.currentTime = Math.min(0.35, Number.isFinite(video.duration) ? video.duration * 0.08 : 0.35);
+              await new Promise<void>((resolve) => {
+                const done = () => resolve();
+                video.addEventListener('seeked', done, { once: true });
+                setTimeout(done, 800);
+              });
+            } catch { /* ignore */ }
+            try { await video.play(); } catch { /* ignore autoplay block */ }
+            await new Promise((r) => setTimeout(r, 180));
+            try { video.pause(); } catch { /* ignore */ }
+          });
+          const buf = await loc.screenshot({ type: 'png', timeout: 4000 });
+          if (!buf || buf.length < 800) continue;
+          if (buf.length > maxAssetBytes) continue;
+          const filename = `video_frame_${hashUrl(`${pageUrl}#video-${i}`)}.png`;
+          const localPath = join(assetsDir, filename);
+          const webPath = `/_assets/${filename}`;
+          if (!existsSync(localPath)) {
+            if (!reserveServerlessAssetBytes(buf.length)) continue;
+            writeFileSync(localPath, buf);
+            assetsSaved++;
+            await notifyArtifactWritten(`public/_assets/${filename}`, localPath);
+          }
+          assetMap.set(webPath, webPath);
+          await loc.evaluate((v, path) => {
+            const video = v as HTMLVideoElement;
+            const img = document.createElement('img');
+            img.src = path;
+            img.alt = video.getAttribute('aria-label') || video.getAttribute('title') || '';
+            img.loading = 'eager';
+            img.setAttribute('data-clonyfy-video-frame', '1');
+            const cs = window.getComputedStyle(video);
+            img.style.cssText = [
+              'display:block',
+              'width:100%',
+              'height:100%',
+              'max-width:100%',
+              'object-fit:cover',
+              cs.borderRadius && cs.borderRadius !== '0px' ? `border-radius:${cs.borderRadius}` : '',
+            ].filter(Boolean).join(';');
+            video.replaceWith(img);
+          }, webPath);
+        } catch (err) {
+          logger.debug(`  [SHOPIFY VIDEO FRAME WARN] ${(err as Error).message}`);
+        }
+      }
+    } catch (err) {
+      logger.debug(`  [SHOPIFY VIDEO FRAME SCAN WARN] ${(err as Error).message}`);
+    }
 
     await page.waitForFunction(() => {
       const imgs = Array.from(document.querySelectorAll(
-        'img[data-clonyfy-video-poster], img[data-clonyfy-section-fill], [id^="ab-section"] img, section img[src*="cdn.shopify"]',
+        'img[data-clonyfy-video-poster], img[data-clonyfy-video-frame], section img[src*="cdn.shopify"], main img[src*="cdn.shopify"]',
       ));
       if (!imgs.length) return true;
       const ready = imgs.filter((img) => {
         const el = img as HTMLImageElement;
         return el.complete && el.naturalWidth > 0;
       }).length;
-      return ready >= Math.min(imgs.length, Math.max(2, Math.floor(imgs.length * 0.35)));
+      return ready >= Math.min(imgs.length, Math.max(2, Math.floor(imgs.length * 0.4)));
     }, undefined, { timeout: IS_SERVERLESS ? 5_000 : 8_000 }).catch(() => {});
   }
 
