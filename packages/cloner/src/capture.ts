@@ -1387,7 +1387,24 @@ export async function capturePage(
   // is fast) those elements stay invisible. Freeze the post-scroll visible state.
   await revealNavDropdownLinks(page);
 
-  await page.evaluate(async (fast: boolean, carouselSkip: string) => {
+  // Shopify brochure sections use Tailwind opacity-0 + delay-500/duration-1000.
+  // Give transitions time to finish, then force-reveal non-rotator opacity-0 nodes.
+  if (deepMedia) {
+    await page.waitForTimeout(IS_SERVERLESS ? 1600 : 2200).catch(() => {});
+    await page.waitForFunction(() => {
+      const imgs = Array.from(document.querySelectorAll(
+        '[id^="ab-section"] img, [class*="ab-section"] img, section img[src*="cdn.shopify"], main img[src*="cdn.shopify"]',
+      ));
+      if (!imgs.length) return true;
+      const ready = imgs.filter((img) => {
+        const el = img as HTMLImageElement;
+        return el.complete && el.naturalWidth > 0;
+      }).length;
+      return ready >= Math.min(imgs.length, Math.max(3, Math.floor(imgs.length * 0.4)));
+    }, undefined, { timeout: IS_SERVERLESS ? 5_000 : 8_000 }).catch(() => {});
+  }
+
+  await page.evaluate(async (fast: boolean, carouselSkip: string, shopifyDeep: boolean) => {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await delay(fast ? 500 : 1500);
 
@@ -1429,16 +1446,43 @@ export async function capturePage(
       return false;
     };
 
+    const isStackedRotatorPhrase = (el: HTMLElement, cls: string): boolean => {
+      if (el.getAttribute('aria-hidden') === 'true') return true;
+      if (el.closest('.clonyfy-stacked-rotator,[aria-hidden="true"]')) return true;
+      if (overlapsSiblingText(el)) return true;
+      // Tiny text-only opacity-0 nodes in heroes are usually stacked phrases.
+      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      const hasMedia = !!(el.querySelector && el.querySelector('img,picture,video,source,canvas,svg'));
+      if (/\bopacity-0\b/.test(cls) && !hasMedia && text.length > 0 && text.length < 80) {
+        const r = el.getBoundingClientRect();
+        if (r.height > 0 && r.height < 120) return true;
+      }
+      return false;
+    };
+
+    // Shopify: strip reveal-animation utility classes so static HTML is visible.
+    if (shopifyDeep) {
+      document.querySelectorAll('[class*="opacity-0"],[class*="translate-y-"]').forEach((node) => {
+        const el = node as HTMLElement;
+        if (el.closest(carouselSkip)) return;
+        const cls = String(el.className || '');
+        if (isStackedRotatorPhrase(el, cls)) return;
+        el.classList.remove('opacity-0');
+        // Keep transform utilities from permanently hiding sections.
+        for (const c of Array.from(el.classList)) {
+          if (/^translate-y-(?:\d+|full)$/.test(c) || /^delay-\d+$/.test(c)) el.classList.remove(c);
+        }
+        el.style.setProperty('opacity', '1', 'important');
+        el.style.setProperty('visibility', 'visible', 'important');
+        el.style.setProperty('transform', 'none', 'important');
+      });
+    }
+
     document.querySelectorAll('*').forEach((node) => {
       const el = node as HTMLElement;
       if (el.closest(carouselSkip)) return;
-      // Never force-show stacked rotator phrases (Shopify hero etc.)
-      if (el.getAttribute('aria-hidden') === 'true') return;
-      if (overlapsSiblingText(el)) return;
-      // Don't force-show Tailwind opacity-0 / translate-y hidden rotator phrases
       const cls = String(el.className || '');
-      if (/\bopacity-0\b/.test(cls) || /\btranslate-y-(?:100|full)\b/.test(cls)) return;
-      if (el.closest('.clonyfy-stacked-rotator,[aria-hidden="true"]')) return;
+      if (isStackedRotatorPhrase(el, cls)) return;
       const style = el.style;
       const cs = window.getComputedStyle(el);
       if (!hasSize(el)) return;
@@ -1448,6 +1492,12 @@ export async function capturePage(
       const hasCssAnim = !!animName && animName !== 'none';
       const hasMotionClass = /\b(animate|motion|marquee|ticker|scroll|parallax|ken-burns|kenburns)\b/i.test(cls);
       if (hasCssAnim || hasMotionClass) return;
+
+      // Reveal Tailwind opacity-0 sections (brochure cards) — previously skipped entirely.
+      if (/\bopacity-0\b/.test(cls)) {
+        el.classList.remove('opacity-0');
+        style.setProperty('opacity', '1', 'important');
+      }
 
       if (isZeroOpacity(style.opacity)) {
         const computed = parseFloat(cs.opacity);
@@ -1462,7 +1512,7 @@ export async function capturePage(
       const transform = style.transform || cs.transform;
       if (shouldResetTransform(transform)) style.transform = 'none';
     });
-  }, fastScroll, CAROUSEL_SKIP_SELECTOR).catch((err) => {
+  }, fastScroll, CAROUSEL_SKIP_SELECTOR, deepMedia).catch((err) => {
     logger.debug(`  [VISIBILITY FREEZE WARN] ${(err as Error).message}`);
   });
 

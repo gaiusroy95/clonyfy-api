@@ -2379,7 +2379,23 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       logger.debug(`  [NIMG FREEZE WARN] ${err.message}`);
     });
     await revealNavDropdownLinks(page);
-    await page.evaluate(async (fast, carouselSkip) => {
+    if (deepMedia) {
+      await page.waitForTimeout(IS_SERVERLESS2 ? 1600 : 2200).catch(() => {
+      });
+      await page.waitForFunction(() => {
+        const imgs = Array.from(document.querySelectorAll(
+          '[id^="ab-section"] img, [class*="ab-section"] img, section img[src*="cdn.shopify"], main img[src*="cdn.shopify"]'
+        ));
+        if (!imgs.length) return true;
+        const ready = imgs.filter((img) => {
+          const el = img;
+          return el.complete && el.naturalWidth > 0;
+        }).length;
+        return ready >= Math.min(imgs.length, Math.max(3, Math.floor(imgs.length * 0.4)));
+      }, void 0, { timeout: IS_SERVERLESS2 ? 5e3 : 8e3 }).catch(() => {
+      });
+    }
+    await page.evaluate(async (fast, carouselSkip, shopifyDeep) => {
       const delay = (ms) => new Promise((r) => setTimeout(r, ms));
       await delay(fast ? 500 : 1500);
       const isZeroOpacity = (value) => {
@@ -2418,14 +2434,38 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         if (/translate3d\([^)]*,\s*-?\d{2,}/.test(transform)) return true;
         return false;
       };
+      const isStackedRotatorPhrase = (el, cls) => {
+        if (el.getAttribute("aria-hidden") === "true") return true;
+        if (el.closest('.clonyfy-stacked-rotator,[aria-hidden="true"]')) return true;
+        if (overlapsSiblingText(el)) return true;
+        const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+        const hasMedia = !!(el.querySelector && el.querySelector("img,picture,video,source,canvas,svg"));
+        if (/\bopacity-0\b/.test(cls) && !hasMedia && text.length > 0 && text.length < 80) {
+          const r = el.getBoundingClientRect();
+          if (r.height > 0 && r.height < 120) return true;
+        }
+        return false;
+      };
+      if (shopifyDeep) {
+        document.querySelectorAll('[class*="opacity-0"],[class*="translate-y-"]').forEach((node) => {
+          const el = node;
+          if (el.closest(carouselSkip)) return;
+          const cls = String(el.className || "");
+          if (isStackedRotatorPhrase(el, cls)) return;
+          el.classList.remove("opacity-0");
+          for (const c of Array.from(el.classList)) {
+            if (/^translate-y-(?:\d+|full)$/.test(c) || /^delay-\d+$/.test(c)) el.classList.remove(c);
+          }
+          el.style.setProperty("opacity", "1", "important");
+          el.style.setProperty("visibility", "visible", "important");
+          el.style.setProperty("transform", "none", "important");
+        });
+      }
       document.querySelectorAll("*").forEach((node) => {
         const el = node;
         if (el.closest(carouselSkip)) return;
-        if (el.getAttribute("aria-hidden") === "true") return;
-        if (overlapsSiblingText(el)) return;
         const cls = String(el.className || "");
-        if (/\bopacity-0\b/.test(cls) || /\btranslate-y-(?:100|full)\b/.test(cls)) return;
-        if (el.closest('.clonyfy-stacked-rotator,[aria-hidden="true"]')) return;
+        if (isStackedRotatorPhrase(el, cls)) return;
         const style = el.style;
         const cs = window.getComputedStyle(el);
         if (!hasSize(el)) return;
@@ -2433,6 +2473,10 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         const hasCssAnim = !!animName && animName !== "none";
         const hasMotionClass = /\b(animate|motion|marquee|ticker|scroll|parallax|ken-burns|kenburns)\b/i.test(cls);
         if (hasCssAnim || hasMotionClass) return;
+        if (/\bopacity-0\b/.test(cls)) {
+          el.classList.remove("opacity-0");
+          style.setProperty("opacity", "1", "important");
+        }
         if (isZeroOpacity(style.opacity)) {
           const computed = parseFloat(cs.opacity);
           style.opacity = computed > 0.05 ? String(computed) : "1";
@@ -2445,7 +2489,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         const transform = style.transform || cs.transform;
         if (shouldResetTransform(transform)) style.transform = "none";
       });
-    }, fastScroll, CAROUSEL_SKIP_SELECTOR).catch((err) => {
+    }, fastScroll, CAROUSEL_SKIP_SELECTOR, deepMedia).catch((err) => {
       logger.debug(`  [VISIBILITY FREEZE WARN] ${err.message}`);
     });
     await page.evaluate(normalizeAllMotionStacksInDocument).catch((err) => {
@@ -12654,4 +12698,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-UAVTKHZT.js.map
+//# sourceMappingURL=chunk-THCD2LYC.js.map
