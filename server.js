@@ -1585,11 +1585,27 @@ async function readPersistedJob(id) {
   if (!raw) return null;
   try {
     const job = JSON.parse(raw);
-    // If the job was persisted as running but has no live process, the server
-    // restarted mid-job. Mark it as errored so the UI doesn't spin forever.
+    // jobs Map is per process/isolate. On Vercel, /api/status often lands on a
+    // different isolate than the one running waitUntil — absence from Map does
+    // NOT mean the clone died. Keep reporting running until wall-clock expiry.
+    // On dedicated hosts (Render), a restart really kills the crawl → mark error.
     if (isActiveJob(job) && !jobs.has(id)) {
-      job.status = 'error';
-      job.logs = [...(job.logs || []), '[ERROR] Clone was interrupted — server restarted while this job was running.'];
+      const startedMs = Date.parse(String(job.startedAt || '')) || 0;
+      const ageMs = startedMs ? Date.now() - startedMs : 0;
+      const pastDeadline = startedMs > 0 && ageMs > CLONE_DEADLINE_MS + 60_000;
+      if (!IS_SERVERLESS || pastDeadline) {
+        job.status = 'error';
+        const msg = IS_SERVERLESS
+          ? '[ERROR] Clone timed out — the serverless worker ended before this job finished.'
+          : '[ERROR] Clone was interrupted — server restarted while this job was running.';
+        job.logs = [...(job.logs || []), msg];
+        saveCloneTextFile(jobStoragePath(id), JSON.stringify(jobSnapshot(job))).catch(() => {});
+        updateCloneStatus({
+          id,
+          status: 'error',
+          completedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
     }
     return job;
   } catch { return null; }
