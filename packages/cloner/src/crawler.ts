@@ -33,14 +33,14 @@ const NON_PAGE_EXTS = new Set([
   '.webp','.woff','.woff2','.xls','.xlsx','.xml','.zip',
 ]);
 const NAV_DELAY_MS = IS_FAST_CLONE ? 50 : 250;
-const PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 45_000 : 180_000;
+const PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 60_000 : 180_000;
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-const STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 120 : 400;
-const STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 8_000 : 10_000;
-const STATIC_PAGE_TIMEOUT = IS_FAST_CLONE ? 12_000 : 15_000;
-const STATIC_ASSET_MAX_BYTES = (IS_FAST_CLONE ? 4 : 50) * 1024 * 1024;
+const STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 260 : 400;
+const STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 10_000 : 10_000;
+const STATIC_PAGE_TIMEOUT = IS_FAST_CLONE ? 15_000 : 15_000;
+const STATIC_ASSET_MAX_BYTES = (IS_FAST_CLONE ? 8 : 50) * 1024 * 1024;
 const STATIC_ASSET_CONCURRENCY = IS_FAST_CLONE ? 6 : 12;
-const STATIC_PAGE_ASSET_TIMEOUT = IS_FAST_CLONE ? 8_000 : 60_000;
+const STATIC_PAGE_ASSET_TIMEOUT = IS_FAST_CLONE ? 18_000 : 60_000;
 export function shouldUseStaticFirstServerless(
   env: NodeJS.ProcessEnv = process.env,
   serverless = IS_SERVERLESS,
@@ -112,7 +112,7 @@ function hashUrl(url: string): string {
 }
 
 export const SITEMAP_SEED_CAP = IS_SERVERLESS ? 20 : 80;
-export const START_URL_CAPTURE_TIMEOUT = IS_SERVERLESS ? 45_000 : 300_000;
+export const START_URL_CAPTURE_TIMEOUT = IS_SERVERLESS ? 90_000 : 300_000;
 
 const LOW_PRIORITY_PATH_RE = /^\/(legal|privacy|terms|cookie|gdpr|compliance|policy|policies|disclaimer|imprint|sitemap)(\/|$)/i;
 
@@ -396,7 +396,10 @@ async function saveStaticAsset(rawUrl: string, pageUrl: string, assetsDir: strin
     const webPath = `/_assets/${filename}`;
     mkdirSync(assetsDir, { recursive: true });
     if (!existsSync(localPath)) {
-      if (!reserveServerlessAssetBytes(body.length)) {
+      const isPriority = contentType.includes('text/css')
+        || contentType.includes('font')
+        || /\.(css|woff2?|ttf|otf|eot)(\?|$)/i.test(ext);
+      if (!reserveServerlessAssetBytes(body.length, { priority: isPriority })) {
         logger.warn(`  [ASSET BUDGET] Skipping ${absUrl.split('/').pop()} — serverless asset budget (${Math.round(SERVERLESS_ASSET_BUDGET_BYTES / 1024 / 1024)} MB) reached`);
         return null;
       }
@@ -530,16 +533,21 @@ async function fetchStaticPage(
     throw new Error(`Not an HTML page (${contentType})`);
   }
   const html = await res.text();
-  const links = extractLinksFromHtml(html, url, origin);
+  // Promote common lazy attrs so static harvest can find real image URLs.
+  const promotedHtml = html
+    .replace(/\sdata-src=(["'])([^"']+)\1/gi, (m, q, url) => ` src=${q}${url}${q}${m}`)
+    .replace(/\sdata-srcset=(["'])([^"']+)\1/gi, (m, q, url) => ` srcset=${q}${url}${q}${m}`)
+    .replace(/\sdata-lazy-src=(["'])([^"']+)\1/gi, (m, q, url) => ` src=${q}${url}${q}${m}`);
+  const links = extractLinksFromHtml(promotedHtml, url, origin);
   const assets = options.captureAssets === false
     ? []
-    : await collectStaticAssets(html, url, assetsDir, options.maxAssets, options.maxAssetDurationMs);
+    : await collectStaticAssets(promotedHtml, url, assetsDir, options.maxAssets, options.maxAssetDurationMs);
 
   return {
     record: {
       url,
       route: routeForUrl(url),
-      html,
+      html: promotedHtml,
       assets,
       network: [],
       failedAssets: [],

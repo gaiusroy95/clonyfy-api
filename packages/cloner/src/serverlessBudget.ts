@@ -33,7 +33,9 @@ export const IS_SERVERLESS = isServerlessRuntime();
 export const IS_FAST_CLONE = isFastCloneProfile();
 
 /** Shared /tmp budget for downloaded assets (Chromium + HTML also use /tmp on Vercel). */
-export const SERVERLESS_ASSET_BUDGET_BYTES = (IS_SERVERLESS ? 100 : Infinity) * 1024 * 1024;
+export const SERVERLESS_ASSET_BUDGET_BYTES = (IS_SERVERLESS ? 140 : Infinity) * 1024 * 1024;
+/** Keep headroom so CSS/fonts are not starved by large videos/images. */
+const PRIORITY_RESERVE_BYTES = IS_SERVERLESS ? 22 * 1024 * 1024 : 0;
 
 let assetBytesWritten = 0;
 
@@ -46,10 +48,20 @@ export function serverlessAssetBudgetUsed(): number {
 }
 
 /** Returns false when the write would exceed the serverless asset budget. */
-export function reserveServerlessAssetBytes(size: number): boolean {
+export function reserveServerlessAssetBytes(
+  size: number,
+  opts: { priority?: boolean } = {},
+): boolean {
   if (!IS_SERVERLESS) return true;
   if (size <= 0) return true;
-  if (assetBytesWritten + size > SERVERLESS_ASSET_BUDGET_BYTES) return false;
+  const priority = !!opts.priority;
+  const hardLimit = SERVERLESS_ASSET_BUDGET_BYTES;
+  if (assetBytesWritten + size > hardLimit) return false;
+  if (!priority) {
+    // Leave reserve for CSS/fonts unless the asset is small (icons/css chunks).
+    const softLimit = Math.max(hardLimit - PRIORITY_RESERVE_BYTES, hardLimit * 0.8);
+    if (assetBytesWritten + size > softLimit && size > 400_000) return false;
+  }
   assetBytesWritten += size;
   return true;
 }

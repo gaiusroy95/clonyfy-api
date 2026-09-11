@@ -276,8 +276,9 @@ export function isInsideCarousel(el: Element | null): boolean {
 export function domAssetUrlScore(url: string): number {
   if (/shopify-brochure|\/b\/shopify/i.test(url)) return 12;
   if (/\.(png|jpe?g|webp|avif|gif|svg)(\?|$)/i.test(url)) return 10;
+  if (/\.(css|woff2?|ttf|otf|eot)(\?|$)/i.test(url)) return 9;
   if (/cdn\.shopify|shopifycdn|shopify\.com\/.*\/assets/i.test(url)) return 9;
+  if (/images\.stripe|stripe\.com\/.*\.(png|jpe?g|webp|avif|gif|svg)/i.test(url)) return 9;
   if (/\/files\/|\/assets\/|\/media\/|\/images\//i.test(url)) return 7;
-  if (/\.(css|woff2?|ttf)(\?|$)/i.test(url)) return 3;
   return 1;
 }

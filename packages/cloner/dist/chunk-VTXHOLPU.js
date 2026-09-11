@@ -884,15 +884,22 @@ function isFastCloneProfile(env = process.env, cwd = process.cwd()) {
 }
 var IS_SERVERLESS = isServerlessRuntime();
 var IS_FAST_CLONE = isFastCloneProfile();
-var SERVERLESS_ASSET_BUDGET_BYTES = (IS_SERVERLESS ? 100 : Infinity) * 1024 * 1024;
+var SERVERLESS_ASSET_BUDGET_BYTES = (IS_SERVERLESS ? 140 : Infinity) * 1024 * 1024;
+var PRIORITY_RESERVE_BYTES = IS_SERVERLESS ? 22 * 1024 * 1024 : 0;
 var assetBytesWritten = 0;
 function resetServerlessAssetBudget() {
   assetBytesWritten = 0;
 }
-function reserveServerlessAssetBytes(size) {
+function reserveServerlessAssetBytes(size, opts = {}) {
   if (!IS_SERVERLESS) return true;
   if (size <= 0) return true;
-  if (assetBytesWritten + size > SERVERLESS_ASSET_BUDGET_BYTES) return false;
+  const priority = !!opts.priority;
+  const hardLimit = SERVERLESS_ASSET_BUDGET_BYTES;
+  if (assetBytesWritten + size > hardLimit) return false;
+  if (!priority) {
+    const softLimit = Math.max(hardLimit - PRIORITY_RESERVE_BYTES, hardLimit * 0.8);
+    if (assetBytesWritten + size > softLimit && size > 4e5) return false;
+  }
   assetBytesWritten += size;
   return true;
 }
@@ -1162,18 +1169,19 @@ function normalizeAllMotionStacksInDocument() {
 function domAssetUrlScore(url) {
   if (/shopify-brochure|\/b\/shopify/i.test(url)) return 12;
   if (/\.(png|jpe?g|webp|avif|gif|svg)(\?|$)/i.test(url)) return 10;
+  if (/\.(css|woff2?|ttf|otf|eot)(\?|$)/i.test(url)) return 9;
   if (/cdn\.shopify|shopifycdn|shopify\.com\/.*\/assets/i.test(url)) return 9;
+  if (/images\.stripe|stripe\.com\/.*\.(png|jpe?g|webp|avif|gif|svg)/i.test(url)) return 9;
   if (/\/files\/|\/assets\/|\/media\/|\/images\//i.test(url)) return 7;
-  if (/\.(css|woff2?|ttf)(\?|$)/i.test(url)) return 3;
   return 1;
 }
 
 // src/capture.ts
 async function revealNavDropdownLinks(page) {
   try {
-    const maxTriggers = IS_SERVERLESS2 ? 14 : 28;
-    const hoverTimeout = IS_SERVERLESS2 ? 700 : 1200;
-    const pauseMs = IS_SERVERLESS2 ? 60 : 100;
+    const maxTriggers = IS_FAST_CLONE ? 18 : 28;
+    const hoverTimeout = IS_FAST_CLONE ? 900 : 1200;
+    const pauseMs = IS_FAST_CLONE ? 70 : 100;
     const triggers = page.locator(
       'nav button, header button, [role="navigation"] button, [aria-haspopup="true"], [aria-expanded="false"], [data-menu], [class*="dropdown"] button, [class*="nav-item"] button, [class*="Nav"] button, header a[href="#"], nav a[href="#"]'
     );
@@ -1344,24 +1352,53 @@ window.hbspt = window.hbspt || {};
 window.hbspt.forms = window.hbspt.forms || {};
 window.hbspt.forms.create = window.hbspt.forms.create || function () {};
 `;
-var IS_SERVERLESS2 = IS_FAST_CLONE;
-var NAVIGATION_TIMEOUT = IS_SERVERLESS2 ? 12e3 : 3e4;
-var ROUTE_FETCH_TIMEOUT = IS_SERVERLESS2 ? 5e3 : 15e3;
+var IS_FAST = IS_FAST_CLONE;
+var NAVIGATION_TIMEOUT = IS_FAST ? 18e3 : 3e4;
+var ROUTE_FETCH_TIMEOUT = IS_FAST ? 8e3 : 15e3;
 var USER_AGENT2 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-var MAX_ASSET_BYTES = (IS_SERVERLESS2 ? 4 : 50) * 1024 * 1024;
-var MAX_CSS_BYTES = (IS_SERVERLESS2 ? 3 : 25) * 1024 * 1024;
-var SERVERLESS_DOM_ASSET_CAP = 220;
-var SHOPIFY_DOM_ASSET_CAP = 650;
+var MAX_ASSET_BYTES = (IS_FAST ? 8 : 50) * 1024 * 1024;
+var MAX_CSS_BYTES = (IS_FAST ? 5 : 25) * 1024 * 1024;
+var SERVERLESS_DOM_ASSET_CAP = 400;
+var SHOPIFY_DOM_ASSET_CAP = 700;
 var CSS_REF_SCAN_MAX_BYTES = 4 * 1024 * 1024;
+var MARKETING_HOST_SUFFIXES = [
+  "shopify.com",
+  "myshopify.com",
+  "stripe.com",
+  "vercel.com",
+  "linear.app",
+  "notion.so",
+  "notion.com",
+  "figma.com",
+  "framer.com",
+  "webflow.com",
+  "squarespace.com",
+  "airbnb.com",
+  "spotify.com",
+  "dropbox.com",
+  "slack.com",
+  "openai.com",
+  "anthropic.com"
+];
 function isShopifyLikeHost(hostname) {
   const h = String(hostname || "").toLowerCase();
   return h === "shopify.com" || h === "www.shopify.com" || h.endsWith(".shopify.com") || h.endsWith(".myshopify.com") || h === "cdn.shopify.com" || h.includes("shopifycdn") || h.endsWith(".shopifycloud.com");
 }
+function isMarketingSiteHost(hostname) {
+  const h = String(hostname || "").toLowerCase().replace(/^www\./, "");
+  if (isShopifyLikeHost(hostname)) return true;
+  return MARKETING_HOST_SUFFIXES.some((suffix) => h === suffix || h.endsWith(`.${suffix}`));
+}
 function pageNeedsDeepMediaCapture(pageUrl) {
   try {
-    return isShopifyLikeHost(new URL(pageUrl).hostname);
+    const u = new URL(pageUrl);
+    if (isMarketingSiteHost(u.hostname)) return true;
+    const path = (u.pathname || "/").replace(/\/+$/, "") || "/";
+    if (path === "/") return true;
+    if (path.split("/").filter(Boolean).length <= 1) return true;
+    return false;
   } catch {
-    return /shopify\.com|myshopify\.com/i.test(pageUrl);
+    return /shopify|stripe|myshopify|vercel\.com/i.test(pageUrl);
   }
 }
 function hashUrl(url) {
@@ -1408,9 +1445,9 @@ function preferLargestSrcsetCandidate(url) {
 function isLiveCdnMediaUrl(url) {
   try {
     const host = new URL(url).hostname.toLowerCase();
-    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com");
+    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com") || host.endsWith(".stripe.com") || host.includes("stripe.com") || host.endsWith(".b-cdn.net") || host.endsWith(".cloudfront.net") || host.endsWith(".akamaihd.net") || host.endsWith(".fastly.net");
   } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud/i.test(url);
+    return /cdn\.shopify\.com|shopifycdn|shopifycloud|images\.stripe|cloudinary|imgix/i.test(url);
   }
 }
 function extractShopifyBrochureAssetUrls(html) {
@@ -1517,9 +1554,9 @@ function rewriteCssUrls(css, assetMap, baseUrl) {
 async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
   ensurePlaceholderAsset(assetsDir);
   const deepMedia = pageNeedsDeepMediaCapture(pageUrl);
-  const fastScroll = IS_SERVERLESS2 && !deepMedia;
-  const domAssetCap = deepMedia ? IS_SERVERLESS2 ? SHOPIFY_DOM_ASSET_CAP : 900 : IS_SERVERLESS2 ? SERVERLESS_DOM_ASSET_CAP : Infinity;
-  const maxAssetBytes = deepMedia && IS_SERVERLESS2 ? Math.max(MAX_ASSET_BYTES, 8 * 1024 * 1024) : MAX_ASSET_BYTES;
+  const fastScroll = IS_FAST && !deepMedia;
+  const domAssetCap = deepMedia ? IS_FAST ? SHOPIFY_DOM_ASSET_CAP : 900 : IS_FAST ? SERVERLESS_DOM_ASSET_CAP : Infinity;
+  const maxAssetBytes = deepMedia && IS_FAST ? Math.max(MAX_ASSET_BYTES, 8 * 1024 * 1024) : MAX_ASSET_BYTES;
   const page = await context.newPage();
   await page.setExtraHTTPHeaders({
     "User-Agent": USER_AGENT2,
@@ -1636,8 +1673,9 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       const webPath = `/_assets/${filename}`;
       mkdirSync3(assetsDir, { recursive: true });
       const isCss = forceCss || ext === ".css" || contentType.includes("text/css");
+      const isFont = contentType.includes("font") || /\.(woff2?|ttf|otf|eot)(\?|$)/i.test(ext);
       const needsWrite = !existsSync2(localPath);
-      if (needsWrite && !reserveServerlessAssetBytes(body.length)) {
+      if (needsWrite && !reserveServerlessAssetBytes(body.length, { priority: isCss || isFont })) {
         logger.warn(`  [ASSET BUDGET] Skipping ${url.split("/").pop()} \u2014 serverless asset budget (${Math.round(SERVERLESS_ASSET_BUDGET_BYTES / 1024 / 1024)} MB) reached`);
         return null;
       }
@@ -1858,7 +1896,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       }
       logger.debug(`  [NAV] load fired for ${pageUrl}`);
       await page.waitForLoadState("networkidle", {
-        timeout: deepMedia ? IS_SERVERLESS2 ? 8e3 : 15e3 : IS_SERVERLESS2 ? 2e3 : 15e3
+        timeout: deepMedia ? IS_FAST ? 1e4 : 15e3 : IS_FAST ? 5e3 : 15e3
       }).catch(() => {
       });
       logger.debug(`  [NAV] networkidle settled for ${pageUrl}`);
@@ -1874,23 +1912,23 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       const delay = (ms) => new Promise((r) => setTimeout(r, ms));
       const step = Math.max(Math.floor(window.innerHeight * 0.7), 320);
       const started = Date.now();
-      const maxSteps = fast ? 12 : 40;
-      const maxMs = fast ? 2500 : 12e3;
+      const maxSteps = fast ? 22 : 40;
+      const maxMs = fast ? 5e3 : 12e3;
       let y = 0;
       let steps = 0;
       while (y < document.body.scrollHeight && steps < maxSteps && Date.now() - started < maxMs) {
         window.scrollTo(0, y);
-        await delay(fast ? 50 : 90);
+        await delay(fast ? 65 : 90);
         y += step;
         steps++;
       }
       window.scrollTo(0, document.body.scrollHeight);
-      await delay(fast ? 40 : 150);
+      await delay(fast ? 80 : 150);
       y = document.body.scrollHeight;
-      while (y > 0 && steps < maxSteps + 10 && Date.now() - started < maxMs) {
+      while (y > 0 && steps < maxSteps + 12 && Date.now() - started < maxMs) {
         y -= step;
         window.scrollTo(0, Math.max(0, y));
-        await delay(fast ? 30 : 60);
+        await delay(fast ? 40 : 60);
         steps++;
       }
       window.scrollTo(0, 0);
@@ -1911,8 +1949,8 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       }
       window.scrollTo(0, 0);
     }, {
-      maxNodes: deepMedia ? IS_SERVERLESS2 ? 80 : 160 : IS_SERVERLESS2 ? 24 : 60,
-      pauseMs: deepMedia ? IS_SERVERLESS2 ? 35 : 50 : IS_SERVERLESS2 ? 15 : 30
+      maxNodes: deepMedia ? IS_FAST ? 100 : 160 : IS_FAST ? 56 : 60,
+      pauseMs: deepMedia ? IS_FAST ? 40 : 50 : IS_FAST ? 25 : 30
     }).catch((err) => {
       logger.debug(`  [SCROLLINTOVIEW WARN] ${err.message}`);
     });
@@ -1920,7 +1958,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       await page.waitForFunction(() => {
         const imgs = Array.from(document.querySelectorAll('img[loading="lazy"], img[data-src], img[data-srcset], img[srcset]'));
         return imgs.every((img) => img.complete);
-      }, void 0, { timeout: deepMedia ? IS_SERVERLESS2 ? 3e3 : 5e3 : IS_SERVERLESS2 ? 600 : 2e3 });
+      }, void 0, { timeout: deepMedia ? IS_FAST ? 4e3 : 5e3 : IS_FAST ? 2e3 : 2e3 });
     } catch {
     }
     const collectDomAssetUrls = () => page.evaluate(() => {
@@ -2039,7 +2077,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
             }
             const r = await fetch(absUrl, {
               headers: assetFetchHeaders(pageUrl),
-              signal: AbortSignal.timeout(IS_SERVERLESS2 ? 8e3 : 15e3)
+              signal: AbortSignal.timeout(IS_FAST ? 8e3 : 15e3)
             });
             if (r.ok) {
               const contentType = r.headers.get("content-type") ?? "";
@@ -2093,7 +2131,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     if (inlineStyleUrls.length > 0) {
       logger.debug(`  [INLINE CSS] ${inlineStyleUrls.length} url() refs in inline styles`);
     }
-    const inlineStyleUrlsToFetch = IS_SERVERLESS2 ? inlineStyleUrls.slice(0, deepMedia ? 120 : 40) : inlineStyleUrls;
+    const inlineStyleUrlsToFetch = IS_FAST ? inlineStyleUrls.slice(0, deepMedia ? 160 : 90) : inlineStyleUrls;
     for (const u of inlineStyleUrlsToFetch) {
       if (!assetMap.has(u) && !shouldSkipAsset(u) && !ABORT_PATTERNS.some((p) => p.test(u))) {
         pendingAssets.push(async () => {
@@ -2102,7 +2140,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
             if (assetMap.has(absUrl)) return;
             const r = await fetch(absUrl, {
               headers: assetFetchHeaders(pageUrl),
-              signal: AbortSignal.timeout(IS_SERVERLESS2 ? 8e3 : 15e3)
+              signal: AbortSignal.timeout(IS_FAST ? 8e3 : 15e3)
             });
             if (r.ok) {
               const contentType = r.headers.get("content-type") ?? "";
@@ -2126,7 +2164,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         });
       }
     }
-    const PENDING_BATCH = IS_SERVERLESS2 ? 4 : 10;
+    const PENDING_BATCH = IS_FAST ? 4 : 10;
     let failedPending = 0;
     let pendingIndex = 0;
     while (pendingIndex < pendingAssets.length) {
@@ -2193,14 +2231,14 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         }
         return results.slice(0, MAX);
       }, interactiveSelectors);
-      const carouselClicks = IS_SERVERLESS2 ? 3 : 8;
+      const carouselClicks = IS_FAST ? 3 : 8;
       for (let i = 0; i < carouselClicks; i++) {
         for (const sel of carouselSelectors) {
           try {
             const btn = page.locator(sel).first();
             if (await btn.count() === 0) continue;
             await btn.click({ timeout: 1500, force: true });
-            await page.waitForTimeout(IS_SERVERLESS2 ? 200 : 400);
+            await page.waitForTimeout(IS_FAST ? 200 : 400);
           } catch {
           }
         }
@@ -2215,12 +2253,12 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           } catch {
           }
         }
-        await page.waitForLoadState("networkidle", { timeout: IS_SERVERLESS2 ? 2e3 : 6e3 }).catch(() => {
+        await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 2e3 : 6e3 }).catch(() => {
         });
       }
     } catch {
     }
-    await page.waitForLoadState("networkidle", { timeout: IS_SERVERLESS2 ? 2e3 : 8e3 }).catch(() => {
+    await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 2e3 : 8e3 }).catch(() => {
     });
     const moreDomAssets = await collectDomAssetUrls();
     if (moreDomAssets.length) {
@@ -2234,7 +2272,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         })
       )];
       domAssetUrls = [.../* @__PURE__ */ new Set([...domAssetUrls, ...normalizedMore])];
-      const extraToFetch = IS_SERVERLESS2 ? normalizedMore.sort((a, b) => domAssetUrlScore(b) - domAssetUrlScore(a)).slice(0, deepMedia ? 160 : 80) : normalizedMore;
+      const extraToFetch = IS_FAST ? normalizedMore.sort((a, b) => domAssetUrlScore(b) - domAssetUrlScore(a)).slice(0, deepMedia ? 160 : 80) : normalizedMore;
       const postInteractAssets = [];
       for (const u of extraToFetch) {
         if (!assetMap.has(u) && !shouldSkipAsset(u) && !ABORT_PATTERNS.some((p) => p.test(u))) {
@@ -2248,7 +2286,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
               }
               const r = await fetch(absUrl, {
                 headers: assetFetchHeaders(pageUrl),
-                signal: AbortSignal.timeout(IS_SERVERLESS2 ? 8e3 : 15e3)
+                signal: AbortSignal.timeout(IS_FAST ? 8e3 : 15e3)
               });
               if (r.ok) {
                 const contentType = r.headers.get("content-type") ?? "";
@@ -2273,7 +2311,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         await Promise.all(postInteractAssets.slice(i, i + PENDING_BATCH).map((fn) => fn()));
       }
     }
-    if (!IS_SERVERLESS2 && cmsJsonStubs.size > 0) {
+    if ((!IS_FAST || deepMedia) && cmsJsonStubs.size > 0) {
       logger.debug(`  [TWO-PASS] ${cmsJsonStubs.size} CMS JSON stub(s) detected; reloading for clean snapshot`);
       try {
         await page.goto(pageUrl, { waitUntil: "load", timeout: NAVIGATION_TIMEOUT });
@@ -2333,7 +2371,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           if (src?.startsWith("data:")) return true;
           return el.complete && el.naturalWidth > 0;
         });
-      }, void 0, { timeout: deepMedia ? IS_SERVERLESS2 ? 8e3 : 12e3 : IS_SERVERLESS2 ? 4e3 : 1e4 });
+      }, void 0, { timeout: deepMedia ? IS_FAST ? 8e3 : 12e3 : IS_FAST ? 4e3 : 1e4 });
     } catch {
     }
     if (deepMedia) {
@@ -2358,7 +2396,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
             }
           }
           return out;
-        }, IS_SERVERLESS2 ? 4 : 8);
+        }, IS_FAST ? 4 : 8);
         for (const item of canvasPayloads) {
           try {
             const base64 = item.dataUrl.replace(/^data:image\/png;base64,/, "");
@@ -2423,7 +2461,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     await revealNavDropdownLinks(page);
     if (deepMedia) {
       try {
-        await page.waitForTimeout(IS_SERVERLESS2 ? 1800 : 2600).catch(() => {
+        await page.waitForTimeout(IS_FAST ? 1800 : 2600).catch(() => {
         });
         await page.waitForFunction(() => {
           const needles = [
@@ -2441,7 +2479,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           const videos = document.querySelectorAll("video").length;
           const imgs = document.querySelectorAll('img[src*="cdn.shopify"], img[src*="brochure"]').length;
           return foundMedia >= 1 || videos >= 1 || imgs >= 8;
-        }, void 0, { timeout: IS_SERVERLESS2 ? 6e3 : 1e4 }).catch(() => {
+        }, void 0, { timeout: IS_FAST ? 6e3 : 1e4 }).catch(() => {
         });
         try {
           const hydratedHtml = await page.content();
@@ -2449,7 +2487,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           for (const [k, v] of more) videoPosterBySrc.set(k, v);
           const moreImages = extractShopifyBrochureAssetUrls(hydratedHtml).filter((u) => isShopifyBrochureImageUrl(u));
           const brochurePending = [];
-          for (const u of moreImages.slice(0, IS_SERVERLESS2 ? 120 : 250)) {
+          for (const u of moreImages.slice(0, IS_FAST ? 120 : 250)) {
             if (assetMap.has(u) || shouldSkipAsset(u)) continue;
             brochurePending.push(async () => {
               try {
@@ -2457,7 +2495,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
                 if (assetMap.has(absUrl)) return;
                 const r = await fetch(absUrl, {
                   headers: assetFetchHeaders(pageUrl),
-                  signal: AbortSignal.timeout(IS_SERVERLESS2 ? 8e3 : 15e3)
+                  signal: AbortSignal.timeout(IS_FAST ? 8e3 : 15e3)
                 });
                 if (!r.ok) return;
                 const buf = Buffer.from(await r.arrayBuffer());
@@ -2467,7 +2505,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
               }
             });
           }
-          const batch = IS_SERVERLESS2 ? 4 : 10;
+          const batch = IS_FAST ? 4 : 10;
           for (let i = 0; i < brochurePending.length; i += batch) {
             await Promise.all(brochurePending.slice(i, i + batch).map((fn) => fn()));
           }
@@ -2499,7 +2537,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           window.scrollTo(0, 0);
         }).catch(() => {
         });
-        await page.waitForTimeout(IS_SERVERLESS2 ? 900 : 1500).catch(() => {
+        await page.waitForTimeout(IS_FAST ? 900 : 1500).catch(() => {
         });
         const posterEntries = [...videoPosterBySrc.entries()];
         await page.evaluate((posters) => {
@@ -2548,7 +2586,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         });
         try {
           const needFrame = page.locator("video[data-clonyfy-needs-frame]");
-          const frameCount = Math.min(await needFrame.count(), IS_SERVERLESS2 ? 6 : 12);
+          const frameCount = Math.min(await needFrame.count(), IS_FAST ? 6 : 12);
           for (let i = 0; i < frameCount; i++) {
             const loc = needFrame.nth(i);
             try {
@@ -2633,7 +2671,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
             return el.complete && el.naturalWidth > 0;
           }).length;
           return ready >= Math.min(imgs.length, Math.max(2, Math.floor(imgs.length * 0.4)));
-        }, void 0, { timeout: IS_SERVERLESS2 ? 5e3 : 8e3 }).catch(() => {
+        }, void 0, { timeout: IS_FAST ? 5e3 : 8e3 }).catch(() => {
         });
       } catch (deepErr) {
         logger.warn(`  [SHOPIFY DEEP MEDIA WARN] ${deepErr.message} \u2014 continuing with base snapshot`);
@@ -2748,8 +2786,8 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       });
       if (isAppError) {
         logger.warn(`  [APP ERROR] ${pageUrl} looks like a framework error boundary; waiting and re-snapshotting`);
-        await page.waitForTimeout(IS_SERVERLESS2 ? 800 : 2e3);
-        await page.waitForLoadState("networkidle", { timeout: IS_SERVERLESS2 ? 2e3 : 6e3 }).catch(() => {
+        await page.waitForTimeout(IS_FAST ? 800 : 2e3);
+        await page.waitForLoadState("networkidle", { timeout: IS_FAST ? 2e3 : 6e3 }).catch(() => {
         });
         const retryHtml = await page.content();
         const stillError = /Application Error/i.test(retryHtml) && /page could not be displayed|Something has gone wrong/i.test(retryHtml);
@@ -3438,14 +3476,14 @@ var NON_PAGE_EXTS2 = /* @__PURE__ */ new Set([
   ".zip"
 ]);
 var NAV_DELAY_MS = IS_FAST_CLONE ? 50 : 250;
-var PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 45e3 : 18e4;
+var PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 6e4 : 18e4;
 var USER_AGENT3 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-var STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 120 : 400;
-var STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 8e3 : 1e4;
-var STATIC_PAGE_TIMEOUT = IS_FAST_CLONE ? 12e3 : 15e3;
-var STATIC_ASSET_MAX_BYTES = (IS_FAST_CLONE ? 4 : 50) * 1024 * 1024;
+var STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 260 : 400;
+var STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 1e4 : 1e4;
+var STATIC_PAGE_TIMEOUT = IS_FAST_CLONE ? 15e3 : 15e3;
+var STATIC_ASSET_MAX_BYTES = (IS_FAST_CLONE ? 8 : 50) * 1024 * 1024;
 var STATIC_ASSET_CONCURRENCY = IS_FAST_CLONE ? 6 : 12;
-var STATIC_PAGE_ASSET_TIMEOUT = IS_FAST_CLONE ? 8e3 : 6e4;
+var STATIC_PAGE_ASSET_TIMEOUT = IS_FAST_CLONE ? 18e3 : 6e4;
 function shouldUseStaticFirstServerless(env = process.env, serverless = IS_SERVERLESS) {
   if (!serverless) return false;
   if (env.CLONYFY_BROWSER_FIRST === "1") return false;
@@ -3496,7 +3534,7 @@ function hashUrl2(url) {
   return createHash2("sha1").update(url).digest("hex").slice(0, 16);
 }
 var SITEMAP_SEED_CAP = IS_SERVERLESS ? 20 : 80;
-var START_URL_CAPTURE_TIMEOUT = IS_SERVERLESS ? 45e3 : 3e5;
+var START_URL_CAPTURE_TIMEOUT = IS_SERVERLESS ? 9e4 : 3e5;
 var LOW_PRIORITY_PATH_RE = /^\/(legal|privacy|terms|cookie|gdpr|compliance|policy|policies|disclaimer|imprint|sitemap)(\/|$)/i;
 function isProbablyHtmlDocument(text, contentType) {
   if (contentType && /text\/html|application\/xhtml\+xml/i.test(contentType)) return true;
@@ -3725,7 +3763,8 @@ async function saveStaticAsset(rawUrl, pageUrl, assetsDir) {
     const webPath = `/_assets/${filename}`;
     mkdirSync4(assetsDir, { recursive: true });
     if (!existsSync3(localPath)) {
-      if (!reserveServerlessAssetBytes(body.length)) {
+      const isPriority = contentType.includes("text/css") || contentType.includes("font") || /\.(css|woff2?|ttf|otf|eot)(\?|$)/i.test(ext);
+      if (!reserveServerlessAssetBytes(body.length, { priority: isPriority })) {
         logger.warn(`  [ASSET BUDGET] Skipping ${absUrl.split("/").pop()} \u2014 serverless asset budget (${Math.round(SERVERLESS_ASSET_BUDGET_BYTES / 1024 / 1024)} MB) reached`);
         return null;
       }
@@ -3834,13 +3873,14 @@ async function fetchStaticPage(url, origin, assetsDir, options = {}) {
     throw new Error(`Not an HTML page (${contentType})`);
   }
   const html = await res.text();
-  const links = extractLinksFromHtml(html, url, origin);
-  const assets = options.captureAssets === false ? [] : await collectStaticAssets(html, url, assetsDir, options.maxAssets, options.maxAssetDurationMs);
+  const promotedHtml = html.replace(/\sdata-src=(["'])([^"']+)\1/gi, (m, q, url2) => ` src=${q}${url2}${q}${m}`).replace(/\sdata-srcset=(["'])([^"']+)\1/gi, (m, q, url2) => ` srcset=${q}${url2}${q}${m}`).replace(/\sdata-lazy-src=(["'])([^"']+)\1/gi, (m, q, url2) => ` src=${q}${url2}${q}${m}`);
+  const links = extractLinksFromHtml(promotedHtml, url, origin);
+  const assets = options.captureAssets === false ? [] : await collectStaticAssets(promotedHtml, url, assetsDir, options.maxAssets, options.maxAssetDurationMs);
   return {
     record: {
       url,
       route: routeForUrl(url),
-      html,
+      html: promotedHtml,
       assets,
       network: [],
       failedAssets: []
@@ -12717,9 +12757,9 @@ Next steps:`);
 }
 
 // src/runClone.ts
-var IS_SERVERLESS3 = isServerlessRuntime();
+var IS_SERVERLESS2 = isServerlessRuntime();
 var IS_FAST_CLONE2 = isFastCloneProfile();
-var SKIP_NEXT_GEN = IS_SERVERLESS3 || IS_FAST_CLONE2 || process.env.CLONYFY_SKIP_NEXT === "1" || process.env.CLONYFY_SKIP_NEXT === "true";
+var SKIP_NEXT_GEN = IS_SERVERLESS2 || IS_FAST_CLONE2 || process.env.CLONYFY_SKIP_NEXT === "1" || process.env.CLONYFY_SKIP_NEXT === "true";
 async function runClone(options, events = {}) {
   const opts = {
     ...options,
@@ -12900,12 +12940,12 @@ Total unique assets saved: ${uniqueAssets.size}`);
         // Keep asset map for preview rewrite; drop bulky network logs on hosted/fast
         // so manifest.json stays under Supabase Free storage limits (~50MB).
         assets: r.assets,
-        network: IS_SERVERLESS3 || IS_FAST_CLONE2 ? [] : r.network,
+        network: IS_SERVERLESS2 || IS_FAST_CLONE2 ? [] : r.network,
         failedAssets: r.failedAssets
       }))
     };
     const manifestPath = join6(opts.out, "manifest.json");
-    const manifestJson = IS_SERVERLESS3 || IS_FAST_CLONE2 ? JSON.stringify(manifest) : JSON.stringify(manifest, null, 2);
+    const manifestJson = IS_SERVERLESS2 || IS_FAST_CLONE2 ? JSON.stringify(manifest) : JSON.stringify(manifest, null, 2);
     writeFileSync5(manifestPath, manifestJson, "utf8");
     await notifyArtifact({ relPath: "manifest.json", absPath: manifestPath, kind: "manifest" });
     if (!SKIP_NEXT_GEN) {
@@ -12983,4 +13023,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-A2VDJZZX.js.map
+//# sourceMappingURL=chunk-VTXHOLPU.js.map

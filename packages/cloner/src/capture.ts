@@ -24,10 +24,10 @@ import {
 /** Hover / expand nav menus so product links (e.g. /payments) appear in the DOM. */
 async function revealNavDropdownLinks(page: Page): Promise<void> {
   try {
-    // Serverless: fewer hovers, shorter timeouts — still enough for Stripe mega-menus.
-    const maxTriggers = IS_SERVERLESS ? 14 : 28;
-    const hoverTimeout = IS_SERVERLESS ? 700 : 1200;
-    const pauseMs = IS_SERVERLESS ? 60 : 100;
+    // Fast clones: fewer hovers, shorter timeouts — still enough for Stripe mega-menus.
+    const maxTriggers = IS_FAST_CLONE ? 18 : 28;
+    const hoverTimeout = IS_FAST_CLONE ? 900 : 1200;
+    const pauseMs = IS_FAST_CLONE ? 70 : 100;
     const triggers = page.locator(
       'nav button, header button, [role="navigation"] button, [aria-haspopup="true"], [aria-expanded="false"], [data-menu], [class*="dropdown"] button, [class*="nav-item"] button, [class*="Nav"] button, header a[href="#"], nav a[href="#"]',
     );
@@ -170,20 +170,41 @@ window.hbspt.forms = window.hbspt.forms || {};
 window.hbspt.forms.create = window.hbspt.forms.create || function () {};
 `;
 
-/** Fast budgets on Render/hosted + serverless; full desktop profile only on local deep clones. */
-const IS_SERVERLESS = IS_FAST_CLONE;
-const NAVIGATION_TIMEOUT = IS_SERVERLESS ? 12_000 : 30_000;
-const ROUTE_FETCH_TIMEOUT = IS_SERVERLESS ? 5_000 : 15_000;
+/** Fast budgets on hosted clones; full desktop profile only on local deep clones.
+ *  Do NOT treat IS_FAST as "Vercel-only" — Render also uses IS_FAST_CLONE. */
+const IS_FAST = IS_FAST_CLONE;
+const NAVIGATION_TIMEOUT = IS_FAST ? 18_000 : 30_000;
+const ROUTE_FETCH_TIMEOUT = IS_FAST ? 8_000 : 15_000;
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-const MAX_ASSET_BYTES = (IS_SERVERLESS ? 4 : 50) * 1024 * 1024; // Cap large media so hosted persist finishes.
-const MAX_CSS_BYTES = (IS_SERVERLESS ? 3 : 25) * 1024 * 1024; // CSS bundles can be larger than media icons/fonts.
-const SERVERLESS_DOM_ASSET_CAP = 220; // Shopify homepage alone has 50+ images + fonts/videos.
-const SHOPIFY_DOM_ASSET_CAP = 650; // Marketing/brochure pages ship many CDN images + videos.
+const MAX_ASSET_BYTES = (IS_FAST ? 8 : 50) * 1024 * 1024; // Align with hosted persist cap so heroes survive.
+const MAX_CSS_BYTES = (IS_FAST ? 5 : 25) * 1024 * 1024;
+const SERVERLESS_DOM_ASSET_CAP = 400; // Marketing pages need CSS/fonts + many images.
+const SHOPIFY_DOM_ASSET_CAP = 700;
 // Upper bound on CSS we scan for url()/image-set()/@import references. The old
 // 500KB limit silently skipped ref-extraction for big bundles (Tailwind/CMS CSS
 // routinely exceeds it), so fonts and background images they referenced never
 // downloaded. 4MB covers virtually all real stylesheets while bounding regex cost.
 const CSS_REF_SCAN_MAX_BYTES = 4 * 1024 * 1024;
+
+const MARKETING_HOST_SUFFIXES = [
+  'shopify.com',
+  'myshopify.com',
+  'stripe.com',
+  'vercel.com',
+  'linear.app',
+  'notion.so',
+  'notion.com',
+  'figma.com',
+  'framer.com',
+  'webflow.com',
+  'squarespace.com',
+  'airbnb.com',
+  'spotify.com',
+  'dropbox.com',
+  'slack.com',
+  'openai.com',
+  'anthropic.com',
+];
 
 function isShopifyLikeHost(hostname: string): boolean {
   const h = String(hostname || '').toLowerCase();
@@ -198,11 +219,24 @@ function isShopifyLikeHost(hostname: string): boolean {
   );
 }
 
+function isMarketingSiteHost(hostname: string): boolean {
+  const h = String(hostname || '').toLowerCase().replace(/^www\./, '');
+  if (isShopifyLikeHost(hostname)) return true;
+  return MARKETING_HOST_SUFFIXES.some((suffix) => h === suffix || h.endsWith(`.${suffix}`));
+}
+
+/** Deeper lazy/scroll/media harvest for brochure homepages and known marketing sites. */
 function pageNeedsDeepMediaCapture(pageUrl: string): boolean {
   try {
-    return isShopifyLikeHost(new URL(pageUrl).hostname);
+    const u = new URL(pageUrl);
+    if (isMarketingSiteHost(u.hostname)) return true;
+    const path = (u.pathname || '/').replace(/\/+$/, '') || '/';
+    // Homepages and top-level marketing routes need deep harvest on hosted clones.
+    if (path === '/') return true;
+    if (path.split('/').filter(Boolean).length <= 1) return true;
+    return false;
   } catch {
-    return /shopify\.com|myshopify\.com/i.test(pageUrl);
+    return /shopify|stripe|myshopify|vercel\.com/i.test(pageUrl);
   }
 }
 
@@ -270,9 +304,15 @@ function isLiveCdnMediaUrl(url: string): boolean {
       || host.endsWith('.myshopify.com')
       || host.endsWith('.imgix.net')
       || host.endsWith('.cloudinary.com')
+      || host.endsWith('.stripe.com')
+      || host.includes('stripe.com')
+      || host.endsWith('.b-cdn.net')
+      || host.endsWith('.cloudfront.net')
+      || host.endsWith('.akamaihd.net')
+      || host.endsWith('.fastly.net')
     );
   } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud/i.test(url);
+    return /cdn\.shopify\.com|shopifycdn|shopifycloud|images\.stripe|cloudinary|imgix/i.test(url);
   }
 }
 
@@ -425,12 +465,12 @@ export async function capturePage(
 ): Promise<{ record: PageRecord; links: string[] }> {
   ensurePlaceholderAsset(assetsDir);
   const deepMedia = pageNeedsDeepMediaCapture(pageUrl);
-  // Shopify marketing pages need deeper scroll/lazy harvest even on hosted fast clones.
-  const fastScroll = IS_SERVERLESS && !deepMedia;
+  // Marketing/deep pages need deeper scroll even on hosted fast clones.
+  const fastScroll = IS_FAST && !deepMedia;
   const domAssetCap = deepMedia
-    ? (IS_SERVERLESS ? SHOPIFY_DOM_ASSET_CAP : 900)
-    : (IS_SERVERLESS ? SERVERLESS_DOM_ASSET_CAP : Infinity);
-  const maxAssetBytes = deepMedia && IS_SERVERLESS
+    ? (IS_FAST ? SHOPIFY_DOM_ASSET_CAP : 900)
+    : (IS_FAST ? SERVERLESS_DOM_ASSET_CAP : Infinity);
+  const maxAssetBytes = deepMedia && IS_FAST
     ? Math.max(MAX_ASSET_BYTES, 8 * 1024 * 1024)
     : MAX_ASSET_BYTES;
   const page = await context.newPage();
@@ -559,8 +599,9 @@ export async function capturePage(
       mkdirSync(assetsDir, { recursive: true });
 
       const isCss = forceCss || ext === '.css' || contentType.includes('text/css');
+      const isFont = contentType.includes('font') || /\.(woff2?|ttf|otf|eot)(\?|$)/i.test(ext);
       const needsWrite = !existsSync(localPath);
-      if (needsWrite && !reserveServerlessAssetBytes(body.length)) {
+      if (needsWrite && !reserveServerlessAssetBytes(body.length, { priority: isCss || isFont })) {
         logger.warn(`  [ASSET BUDGET] Skipping ${url.split('/').pop()} — serverless asset budget (${Math.round(SERVERLESS_ASSET_BUDGET_BYTES / 1024 / 1024)} MB) reached`);
         return null;
       }
@@ -817,7 +858,7 @@ export async function capturePage(
     logger.debug(`  [NAV] load fired for ${pageUrl}`);
     // Wait for networkidle - aborted beacon patterns above help this settle quickly
     await page.waitForLoadState('networkidle', {
-      timeout: deepMedia ? (IS_SERVERLESS ? 8_000 : 15_000) : (IS_SERVERLESS ? 2_000 : 15_000),
+      timeout: deepMedia ? (IS_FAST ? 10_000 : 15_000) : (IS_FAST ? 5_000 : 15_000),
     }).catch(() => {});
     logger.debug(`  [NAV] networkidle settled for ${pageUrl}`);
   } catch (err: unknown) {
@@ -837,24 +878,24 @@ export async function capturePage(
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const step = Math.max(Math.floor(window.innerHeight * 0.7), 320);
     const started = Date.now();
-    const maxSteps = fast ? 12 : 40;
-    const maxMs = fast ? 2_500 : 12_000;
+    const maxSteps = fast ? 22 : 40;
+    const maxMs = fast ? 5_000 : 12_000;
     let y = 0;
     let steps = 0;
     while (y < document.body.scrollHeight && steps < maxSteps && Date.now() - started < maxMs) {
       window.scrollTo(0, y);
-      await delay(fast ? 50 : 90);
+      await delay(fast ? 65 : 90);
       y += step;
       steps++;
     }
     window.scrollTo(0, document.body.scrollHeight);
-    await delay(fast ? 40 : 150);
+    await delay(fast ? 80 : 150);
     // Second pass upward helps sticky/reveal sections that only mount once.
     y = document.body.scrollHeight;
-    while (y > 0 && steps < maxSteps + 10 && Date.now() - started < maxMs) {
+    while (y > 0 && steps < maxSteps + 12 && Date.now() - started < maxMs) {
       y -= step;
       window.scrollTo(0, Math.max(0, y));
-      await delay(fast ? 30 : 60);
+      await delay(fast ? 40 : 60);
       steps++;
     }
     window.scrollTo(0, 0);
@@ -876,8 +917,8 @@ export async function capturePage(
     }
     window.scrollTo(0, 0);
   }, {
-    maxNodes: deepMedia ? (IS_SERVERLESS ? 80 : 160) : (IS_SERVERLESS ? 24 : 60),
-    pauseMs: deepMedia ? (IS_SERVERLESS ? 35 : 50) : (IS_SERVERLESS ? 15 : 30),
+    maxNodes: deepMedia ? (IS_FAST ? 100 : 160) : (IS_FAST ? 56 : 60),
+    pauseMs: deepMedia ? (IS_FAST ? 40 : 50) : (IS_FAST ? 25 : 30),
   }).catch((err) => {
     logger.debug(`  [SCROLLINTOVIEW WARN] ${(err as Error).message}`);
   });
@@ -887,7 +928,7 @@ export async function capturePage(
     await page.waitForFunction(() => {
       const imgs = Array.from(document.querySelectorAll('img[loading="lazy"], img[data-src], img[data-srcset], img[srcset]'));
       return imgs.every((img) => (img as HTMLImageElement).complete);
-    }, undefined, { timeout: deepMedia ? (IS_SERVERLESS ? 3_000 : 5_000) : (IS_SERVERLESS ? 600 : 2_000) });
+    }, undefined, { timeout: deepMedia ? (IS_FAST ? 4_000 : 5_000) : (IS_FAST ? 2_000 : 2_000) });
   } catch { /* timeout is fine */ }
 
   // Some sites keep images/videos only in lazy data-* attributes until custom JS runs.
@@ -1013,7 +1054,7 @@ export async function capturePage(
           } catch { /* ignore */ }
           const r = await fetch(absUrl, {
             headers: assetFetchHeaders(pageUrl),
-            signal: AbortSignal.timeout(IS_SERVERLESS ? 8_000 : 15_000),
+            signal: AbortSignal.timeout(IS_FAST ? 8_000 : 15_000),
           });
           if (r.ok) {
             const contentType = r.headers.get('content-type') ?? '';
@@ -1075,8 +1116,8 @@ export async function capturePage(
     logger.debug(`  [INLINE CSS] ${inlineStyleUrls.length} url() refs in inline styles`);
   }
 
-  const inlineStyleUrlsToFetch = IS_SERVERLESS
-    ? inlineStyleUrls.slice(0, deepMedia ? 120 : 40)
+  const inlineStyleUrlsToFetch = IS_FAST
+    ? inlineStyleUrls.slice(0, deepMedia ? 160 : 90)
     : inlineStyleUrls;
   for (const u of inlineStyleUrlsToFetch) {
     if (!assetMap.has(u) && !shouldSkipAsset(u) && !ABORT_PATTERNS.some((p) => p.test(u))) {
@@ -1086,7 +1127,7 @@ export async function capturePage(
           if (assetMap.has(absUrl)) return;
           const r = await fetch(absUrl, {
             headers: assetFetchHeaders(pageUrl),
-            signal: AbortSignal.timeout(IS_SERVERLESS ? 8_000 : 15_000),
+            signal: AbortSignal.timeout(IS_FAST ? 8_000 : 15_000),
           });
           if (r.ok) {
             const contentType = r.headers.get('content-type') ?? '';
@@ -1112,7 +1153,7 @@ export async function capturePage(
   }
 
   // Fetch pending CSS-referenced assets in batches to avoid OOM from too many parallel fetches
-  const PENDING_BATCH = IS_SERVERLESS ? 4 : 10;
+  const PENDING_BATCH = IS_FAST ? 4 : 10;
   let failedPending = 0;
   let pendingIndex = 0;
   while (pendingIndex < pendingAssets.length) {
@@ -1184,14 +1225,14 @@ export async function capturePage(
       return results.slice(0, MAX);
     }, interactiveSelectors);
 
-    const carouselClicks = IS_SERVERLESS ? 3 : 8;
+    const carouselClicks = IS_FAST ? 3 : 8;
     for (let i = 0; i < carouselClicks; i++) {
       for (const sel of carouselSelectors) {
         try {
           const btn = page.locator(sel).first();
           if (await btn.count() === 0) continue;
           await btn.click({ timeout: 1500, force: true });
-          await page.waitForTimeout(IS_SERVERLESS ? 200 : 400);
+          await page.waitForTimeout(IS_FAST ? 200 : 400);
         } catch { /* best-effort */ }
       }
     }
@@ -1205,12 +1246,12 @@ export async function capturePage(
           await page.waitForTimeout(300);
         } catch { /* click may fail on hidden/stale element */ }
       }
-      await page.waitForLoadState('networkidle', { timeout: IS_SERVERLESS ? 2_000 : 6_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 2_000 : 6_000 }).catch(() => {});
     }
   } catch { /* interaction pass is best-effort */ }
 
   // Final networkidle wait after scroll + interaction
-  await page.waitForLoadState('networkidle', { timeout: IS_SERVERLESS ? 2_000 : 8_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 2_000 : 8_000 }).catch(() => {});
 
   // Collect lazy image URLs again after carousel/tab interaction.
   const moreDomAssets = await collectDomAssetUrls();
@@ -1224,7 +1265,7 @@ export async function capturePage(
         }),
     )];
     domAssetUrls = [...new Set([...domAssetUrls, ...normalizedMore])];
-    const extraToFetch = IS_SERVERLESS
+    const extraToFetch = IS_FAST
       ? normalizedMore.sort((a, b) => domAssetUrlScore(b) - domAssetUrlScore(a)).slice(0, deepMedia ? 160 : 80)
       : normalizedMore;
     const postInteractAssets: Array<() => Promise<void>> = [];
@@ -1239,7 +1280,7 @@ export async function capturePage(
             } catch { /* ignore */ }
             const r = await fetch(absUrl, {
               headers: assetFetchHeaders(pageUrl),
-              signal: AbortSignal.timeout(IS_SERVERLESS ? 8_000 : 15_000),
+              signal: AbortSignal.timeout(IS_FAST ? 8_000 : 15_000),
             });
             if (r.ok) {
               const contentType = r.headers.get('content-type') ?? '';
@@ -1267,7 +1308,8 @@ export async function capturePage(
   // Two-pass: if a pageerror caused by CMS JSON was detected on the first load,
   // reload the page now that those URLs are stubbed as {} so the JS doesn't crash
   // and the HTML snapshot reflects a clean render.
-  if (!IS_SERVERLESS && cmsJsonStubs.size > 0) {
+  // Allow one CMS JSON stub reload on start/marketing pages even on fast clones.
+  if ((!IS_FAST || deepMedia) && cmsJsonStubs.size > 0) {
     logger.debug(`  [TWO-PASS] ${cmsJsonStubs.size} CMS JSON stub(s) detected; reloading for clean snapshot`);
     try {
       await page.goto(pageUrl, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT });
@@ -1337,7 +1379,7 @@ export async function capturePage(
         if (src?.startsWith('data:')) return true;
         return el.complete && el.naturalWidth > 0;
       });
-    }, undefined, { timeout: deepMedia ? (IS_SERVERLESS ? 8_000 : 12_000) : (IS_SERVERLESS ? 4_000 : 10_000) });
+    }, undefined, { timeout: deepMedia ? (IS_FAST ? 8_000 : 12_000) : (IS_FAST ? 4_000 : 10_000) });
   } catch { /* partial load is still better than an empty snapshot */ }
 
   // Rasterize large canvas/WebGL visuals (e.g. Shopify globe) into <img> so static HTML keeps them.
@@ -1364,7 +1406,7 @@ export async function capturePage(
           }
         }
         return out;
-      }, IS_SERVERLESS ? 4 : 8);
+      }, IS_FAST ? 4 : 8);
 
       for (const item of canvasPayloads) {
         try {
@@ -1445,7 +1487,7 @@ export async function capturePage(
   // Never let this enrichment fail the whole page capture (OOM/timeout → 0 pages).
   if (deepMedia) {
     try {
-    await page.waitForTimeout(IS_SERVERLESS ? 1800 : 2600).catch(() => {});
+    await page.waitForTimeout(IS_FAST ? 1800 : 2600).catch(() => {});
     // Wait until key marketing sections have some media or timeout.
     await page.waitForFunction(() => {
       const needles = [
@@ -1463,7 +1505,7 @@ export async function capturePage(
       const videos = document.querySelectorAll('video').length;
       const imgs = document.querySelectorAll('img[src*="cdn.shopify"], img[src*="brochure"]').length;
       return foundMedia >= 1 || videos >= 1 || imgs >= 8;
-    }, undefined, { timeout: IS_SERVERLESS ? 6_000 : 10_000 }).catch(() => {});
+    }, undefined, { timeout: IS_FAST ? 6_000 : 10_000 }).catch(() => {});
 
     // Refresh poster map + download stills referenced by hydrated DOM (not guessed fills).
     try {
@@ -1472,7 +1514,7 @@ export async function capturePage(
       for (const [k, v] of more) videoPosterBySrc.set(k, v);
       const moreImages = extractShopifyBrochureAssetUrls(hydratedHtml).filter((u) => isShopifyBrochureImageUrl(u));
       const brochurePending: Array<() => Promise<void>> = [];
-      for (const u of moreImages.slice(0, IS_SERVERLESS ? 120 : 250)) {
+      for (const u of moreImages.slice(0, IS_FAST ? 120 : 250)) {
         if (assetMap.has(u) || shouldSkipAsset(u)) continue;
         brochurePending.push(async () => {
           try {
@@ -1480,7 +1522,7 @@ export async function capturePage(
             if (assetMap.has(absUrl)) return;
             const r = await fetch(absUrl, {
               headers: assetFetchHeaders(pageUrl),
-              signal: AbortSignal.timeout(IS_SERVERLESS ? 8_000 : 15_000),
+              signal: AbortSignal.timeout(IS_FAST ? 8_000 : 15_000),
             });
             if (!r.ok) return;
             const buf = Buffer.from(await r.arrayBuffer());
@@ -1489,7 +1531,7 @@ export async function capturePage(
           } catch { /* best-effort */ }
         });
       }
-      const batch = IS_SERVERLESS ? 4 : 10;
+      const batch = IS_FAST ? 4 : 10;
       for (let i = 0; i < brochurePending.length; i += batch) {
         await Promise.all(brochurePending.slice(i, i + batch).map((fn) => fn()));
       }
@@ -1521,7 +1563,7 @@ export async function capturePage(
       }
       window.scrollTo(0, 0);
     }).catch(() => {});
-    await page.waitForTimeout(IS_SERVERLESS ? 900 : 1500).catch(() => {});
+    await page.waitForTimeout(IS_FAST ? 900 : 1500).catch(() => {});
 
     // Freeze ONLY real videos: prefer site poster attr, else matched poster by source URL,
     // else screenshot the live video frame. Never invent/guess section images.
@@ -1575,7 +1617,7 @@ export async function capturePage(
     // Screenshot remaining live videos (actual frame from the real site — not a random asset).
     try {
       const needFrame = page.locator('video[data-clonyfy-needs-frame]');
-      const frameCount = Math.min(await needFrame.count(), IS_SERVERLESS ? 6 : 12);
+      const frameCount = Math.min(await needFrame.count(), IS_FAST ? 6 : 12);
       for (let i = 0; i < frameCount; i++) {
         const loc = needFrame.nth(i);
         try {
@@ -1653,7 +1695,7 @@ export async function capturePage(
         return el.complete && el.naturalWidth > 0;
       }).length;
       return ready >= Math.min(imgs.length, Math.max(2, Math.floor(imgs.length * 0.4)));
-    }, undefined, { timeout: IS_SERVERLESS ? 5_000 : 8_000 }).catch(() => {});
+    }, undefined, { timeout: IS_FAST ? 5_000 : 8_000 }).catch(() => {});
     } catch (deepErr) {
       logger.warn(`  [SHOPIFY DEEP MEDIA WARN] ${(deepErr as Error).message} — continuing with base snapshot`);
     }
@@ -1715,7 +1757,7 @@ export async function capturePage(
       return false;
     };
 
-    // Shopify: strip reveal-animation utility classes so static HTML is visible.
+    // Marketing sites: strip reveal-animation utility classes so static HTML is visible.
     if (shopifyDeep) {
       document.querySelectorAll('[class*="opacity-0"],[class*="translate-y-"]').forEach((node) => {
         const el = node as HTMLElement;
@@ -1788,8 +1830,8 @@ export async function capturePage(
     });
     if (isAppError) {
       logger.warn(`  [APP ERROR] ${pageUrl} looks like a framework error boundary; waiting and re-snapshotting`);
-      await page.waitForTimeout(IS_SERVERLESS ? 800 : 2000);
-      await page.waitForLoadState('networkidle', { timeout: IS_SERVERLESS ? 2_000 : 6_000 }).catch(() => {});
+      await page.waitForTimeout(IS_FAST ? 800 : 2000);
+      await page.waitForLoadState('networkidle', { timeout: IS_FAST ? 2_000 : 6_000 }).catch(() => {});
       const retryHtml = await page.content();
       const stillError = /Application Error/i.test(retryHtml)
         && /page could not be displayed|Something has gone wrong/i.test(retryHtml);

@@ -1319,7 +1319,7 @@ async function persistCloneOutput(outDir, options = {}) {
   const failures = [];
   // Hosted Storage uploads time out on huge binaries — preview only needs HTML + modest assets.
   // Supabase Free global object cap is ~50MB; stay under that for every object.
-  const maxAssetUploadBytes = IS_HOSTED ? 8 * 1024 * 1024 : 50 * 1024 * 1024;
+  const maxAssetUploadBytes = IS_HOSTED ? 12 * 1024 * 1024 : 50 * 1024 * 1024;
   const maxObjectBytes = IS_HOSTED ? 45 * 1024 * 1024 : 50 * 1024 * 1024;
 
   const slimManifestBuffer = (buf) => {
