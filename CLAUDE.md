@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for working in the Clonyfy **Backend** repository (API + cloner). The product UI is a separate Frontend repo.
+Guidance for working in the Clonyfy **Backend** repository (API + cloner). The product UI is a separate Frontend repo
 
 ## Commands
 
