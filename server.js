@@ -3464,7 +3464,7 @@ function contentSecurityPolicyForPath(pathname) {
   ].join('; ');
 }
 
-/** Normalize request URL (supports legacy rewrite query/header if present). */
+/** Normalize request URL (supports Vercel rewrite query/header if present). */
 function parseRequestUrl(req) {
   const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
   const host = String(hostHeader).split(',')[0].trim();
@@ -3472,6 +3472,8 @@ function parseRequestUrl(req) {
   const base = `${proto}://${host}`;
   const url = new URL(req.url || '/', base);
 
+  // vercel.json rewrites all traffic to /api?__clonyfy_path=/original/path so the
+  // single serverless entry can recover the real route (otherwise /api/health → /api).
   if (url.pathname === '/api/index' || url.pathname === '/api') {
     const fromQuery = url.searchParams.get('__clonyfy_path');
     if (fromQuery !== null) {
@@ -3479,7 +3481,10 @@ function parseRequestUrl(req) {
       url.searchParams.delete('__clonyfy_path');
       return url;
     }
-    const fromHeader = req.headers['x-invoke-path'] || req.headers['x-original-url'];
+    const fromHeader = req.headers['x-invoke-path']
+      || req.headers['x-forwarded-uri']
+      || req.headers['x-original-url']
+      || req.headers['x-rewrite-url'];
     if (typeof fromHeader === 'string' && fromHeader.startsWith('/')) {
       return new URL(fromHeader, base);
     }

@@ -4,7 +4,10 @@
   "installCommand": "npm install",
   "buildCommand": "npm run build",
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api" }
+    {
+      "source": "/(.*)",
+      "destination": "/api?__clonyfy_path=/$1"
+    }
   ],
   "functions": {
     "api/index.js": {
