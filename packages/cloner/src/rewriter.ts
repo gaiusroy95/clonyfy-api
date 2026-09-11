@@ -22,7 +22,12 @@ export function isLiveCdnImageUrl(value: string): boolean {
       || host.endsWith('.shopifycloud.com')
       || host.endsWith('.myshopify.com')
       || host.endsWith('.stripe.com')
+      || host.endsWith('.stripeassets.com')
+      || host === 'images.stripeassets.com'
+      || host.endsWith('.stripecdn.com')
       || host.includes('stripe.com')
+      || host.includes('stripeassets.com')
+      || host.includes('stripecdn.com')
       || host.endsWith('.vercel-storage.com')
       || host.endsWith('.vercel-insights.com')
       || /\.(cloudfront|akamaihd|imgix|cloudinary|fastly|b-cdn|cloudflare)\./i.test(host)
@@ -38,7 +43,7 @@ export function isLiveCdnImageUrl(value: string): boolean {
       || host.includes('res.cloudinary.com')
     );
   } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud|stripe\.com|cloudinary|imgix|cloudfront/i.test(String(value || ''));
+    return /cdn\.shopify\.com|shopifycdn|shopifycloud|stripe\.com|stripeassets\.com|stripecdn\.com|cloudinary|imgix|cloudfront/i.test(String(value || ''));
   }
 }
 
@@ -109,8 +114,11 @@ function rewriteUrl(value: string, assetMap: Map<string, string>, baseUrl: strin
   if (!value) return value;
   const decoded = normalizeAssetLookupUrl(value);
 
-  // Near-100% visual fidelity: keep live absolute media URLs instead of swapping
-  // to /_assets/ that may be missing after serverless /tmp offload.
+  // Static HTML already has CDN image URLs (e.g. images.stripeassets.com).
+  // Never rewrite those to /_assets/ — that is the main reason clones look empty.
+  if (/^https?:\/\//i.test(decoded) && isLiveCdnImageUrl(decoded)) {
+    return decoded;
+  }
   if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(decoded)) {
     return decoded;
   }
@@ -125,7 +133,7 @@ function rewriteUrl(value: string, assetMap: Map<string, string>, baseUrl: strin
   // Resolve root-relative and document-relative paths against origin, then look up
   try {
     const abs = new URL(decoded, baseUrl).href;
-    if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) {
+    if (isLiveCdnImageUrl(abs) || (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs))) {
       return abs;
     }
     const absClean = abs.split('?')[0].split('#')[0];
@@ -144,7 +152,6 @@ function rewriteUrl(value: string, assetMap: Map<string, string>, baseUrl: strin
     // Same-origin but not captured as asset — convert to relative path so links still work
     const u = new URL(abs);
     if (u.origin === new URL(baseUrl).origin) {
-      // Quality: prefer absolute same-origin media so preview matches live site.
       if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) return abs;
       return u.pathname + u.search + u.hash;
     }

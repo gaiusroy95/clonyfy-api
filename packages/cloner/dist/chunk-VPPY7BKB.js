@@ -1451,10 +1451,34 @@ function preferLargestSrcsetCandidate(url) {
 function isLiveCdnMediaUrl(url) {
   try {
     const host = new URL(url).hostname.toLowerCase();
-    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com") || host.endsWith(".stripe.com") || host.includes("stripe.com") || host.endsWith(".b-cdn.net") || host.endsWith(".cloudfront.net") || host.endsWith(".akamaihd.net") || host.endsWith(".fastly.net") || host.includes("cdn.sanity.io") || host.includes("imagekit.io") || host.includes("images.unsplash.com");
+    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com") || host.endsWith(".stripe.com") || host.endsWith(".stripeassets.com") || host === "images.stripeassets.com" || host.endsWith(".stripecdn.com") || host.includes("stripe.com") || host.includes("stripeassets.com") || host.includes("stripecdn.com") || host.endsWith(".b-cdn.net") || host.endsWith(".cloudfront.net") || host.endsWith(".akamaihd.net") || host.endsWith(".fastly.net") || host.includes("cdn.sanity.io") || host.includes("imagekit.io") || host.includes("images.unsplash.com");
   } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud|images\.stripe|cloudinary|imgix/i.test(url);
+    return /cdn\.shopify\.com|shopifycdn|shopifycloud|images\.stripe|stripeassets\.com|stripecdn\.com|cloudinary|imgix/i.test(url);
   }
+}
+function bakeStaticMediaVisibility(html) {
+  let out = String(html || "");
+  if (!out || /id=["']clonyfy-static-media-bake["']/.test(out)) return out;
+  out = out.replace(
+    /\bclass=(["'])([^"']*\blazy-animation\b(?![^"']*\blazy-animation--loaded\b)[^"']*)\1/gi,
+    (_m, q, cls) => `class=${q}${cls} lazy-animation--loaded${q}`
+  );
+  out = out.replace(/\sloading=(["'])lazy\1/gi, ' loading="eager"');
+  const bakeCss = `<style id="clonyfy-static-media-bake">
+.lazy-animation,.lazy-animation:not(.lazy-animation--loaded){opacity:1!important;visibility:visible!important}
+.payments-graphic__background-image,.payments-graphic__background-image-mobile,
+[class*="graphic__background-image"],[class*="-graphic__background"] picture,picture[class*="background"]{display:block!important;opacity:1!important;visibility:visible!important}
+.payments-graphic__background-image img,.payments-graphic__background-image-mobile img,
+[class*="graphic__background-image"] img{opacity:1!important;visibility:visible!important;max-width:100%}
+</style>`;
+  if (/<head[^>]*>/i.test(out)) {
+    out = out.replace(/<head[^>]*>/i, (m) => `${m}${bakeCss}`);
+  } else if (/<html[^>]*>/i.test(out)) {
+    out = out.replace(/<html[^>]*>/i, (m) => `${m}<head>${bakeCss}</head>`);
+  } else {
+    out = bakeCss + out;
+  }
+  return out;
 }
 function extractShopifyBrochureAssetUrls(html) {
   const text = String(html || "").replace(/\\u0026/g, "&").replace(/&amp;/gi, "&");
@@ -2749,6 +2773,27 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           el.style.setProperty("transform", "none", "important");
         });
       }
+      document.querySelectorAll(".lazy-animation").forEach((node) => {
+        const el = node;
+        el.classList.add("lazy-animation--loaded");
+        el.style.setProperty("opacity", "1", "important");
+        el.style.setProperty("visibility", "visible", "important");
+      });
+      document.querySelectorAll(
+        '[class*="graphic__background-image"],[class*="-graphic__background"] picture,picture[class*="background"]'
+      ).forEach((node) => {
+        const el = node;
+        el.style.setProperty("display", "block", "important");
+        el.style.setProperty("opacity", "1", "important");
+        el.style.setProperty("visibility", "visible", "important");
+      });
+      document.querySelectorAll('img[loading="lazy"]').forEach((node) => {
+        const img = node;
+        try {
+          img.loading = "eager";
+        } catch {
+        }
+      });
       document.querySelectorAll("*").forEach((node) => {
         const el = node;
         if (el.closest(carouselSkip)) return;
@@ -2802,6 +2847,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       }
     } catch {
     }
+    finalHtml = bakeStaticMediaVisibility(finalHtml);
     const origin = new URL(pageUrl).origin;
     const linkData = await page.evaluate((origin2) => {
       const found = /* @__PURE__ */ new Set();
@@ -12117,9 +12163,9 @@ function normalizeAssetLookupUrl(value) {
 function isLiveCdnImageUrl(value) {
   try {
     const host = new URL(value).hostname.toLowerCase();
-    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".stripe.com") || host.includes("stripe.com") || host.endsWith(".vercel-storage.com") || host.endsWith(".vercel-insights.com") || /\.(cloudfront|akamaihd|imgix|cloudinary|fastly|b-cdn|cloudflare)\./i.test(host) || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com") || host.endsWith(".cloudfront.net") || host.endsWith(".akamaihd.net") || host.endsWith(".fastly.net") || host.endsWith(".b-cdn.net") || host.includes("images.unsplash.com") || host.includes("cdn.sanity.io") || host.includes("imagekit.io") || host.includes("res.cloudinary.com");
+    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".stripe.com") || host.endsWith(".stripeassets.com") || host === "images.stripeassets.com" || host.endsWith(".stripecdn.com") || host.includes("stripe.com") || host.includes("stripeassets.com") || host.includes("stripecdn.com") || host.endsWith(".vercel-storage.com") || host.endsWith(".vercel-insights.com") || /\.(cloudfront|akamaihd|imgix|cloudinary|fastly|b-cdn|cloudflare)\./i.test(host) || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com") || host.endsWith(".cloudfront.net") || host.endsWith(".akamaihd.net") || host.endsWith(".fastly.net") || host.endsWith(".b-cdn.net") || host.includes("images.unsplash.com") || host.includes("cdn.sanity.io") || host.includes("imagekit.io") || host.includes("res.cloudinary.com");
   } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud|stripe\.com|cloudinary|imgix|cloudfront/i.test(String(value || ""));
+    return /cdn\.shopify\.com|shopifycdn|shopifycloud|stripe\.com|stripeassets\.com|stripecdn\.com|cloudinary|imgix|cloudfront/i.test(String(value || ""));
   }
 }
 function isPreferLiveMediaUrl(value) {
@@ -12179,6 +12225,9 @@ function buildAssetMap(assets) {
 function rewriteUrl(value, assetMap, baseUrl) {
   if (!value) return value;
   const decoded = normalizeAssetLookupUrl(value);
+  if (/^https?:\/\//i.test(decoded) && isLiveCdnImageUrl(decoded)) {
+    return decoded;
+  }
   if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(decoded)) {
     return decoded;
   }
@@ -12188,7 +12237,7 @@ function rewriteUrl(value, assetMap, baseUrl) {
   if (assetMap.has(clean)) return assetMap.get(clean);
   try {
     const abs = new URL(decoded, baseUrl).href;
-    if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) {
+    if (isLiveCdnImageUrl(abs) || preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) {
       return abs;
     }
     const absClean = abs.split("?")[0].split("#")[0];
@@ -13060,4 +13109,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-DIBGQL3C.js.map
+//# sourceMappingURL=chunk-VPPY7BKB.js.map

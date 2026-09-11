@@ -305,7 +305,12 @@ function isLiveCdnMediaUrl(url: string): boolean {
       || host.endsWith('.imgix.net')
       || host.endsWith('.cloudinary.com')
       || host.endsWith('.stripe.com')
+      || host.endsWith('.stripeassets.com')
+      || host === 'images.stripeassets.com'
+      || host.endsWith('.stripecdn.com')
       || host.includes('stripe.com')
+      || host.includes('stripeassets.com')
+      || host.includes('stripecdn.com')
       || host.endsWith('.b-cdn.net')
       || host.endsWith('.cloudfront.net')
       || host.endsWith('.akamaihd.net')
@@ -315,8 +320,44 @@ function isLiveCdnMediaUrl(url: string): boolean {
       || host.includes('images.unsplash.com')
     );
   } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud|images\.stripe|cloudinary|imgix/i.test(url);
+    return /cdn\.shopify\.com|shopifycdn|shopifycloud|images\.stripe|stripeassets\.com|stripecdn\.com|cloudinary|imgix/i.test(url);
   }
+}
+
+/**
+ * Bake media visibility into captured HTML itself.
+ * Stripe static HTML already has <picture>/<img> CDN URLs, but CSS keeps them
+ * at opacity:0 / display:none until JS runs — and clone preview disables that JS.
+ */
+export function bakeStaticMediaVisibility(html: string): string {
+  let out = String(html || '');
+  if (!out || /id=["']clonyfy-static-media-bake["']/.test(out)) return out;
+
+  // Mark lazy-animation nodes as loaded in the class list.
+  out = out.replace(
+    /\bclass=(["'])([^"']*\blazy-animation\b(?![^"']*\blazy-animation--loaded\b)[^"']*)\1/gi,
+    (_m, q, cls) => `class=${q}${cls} lazy-animation--loaded${q}`,
+  );
+
+  // Prefer eager loading so preview does not wait for IO that never fires.
+  out = out.replace(/\sloading=(["'])lazy\1/gi, ' loading="eager"');
+
+  const bakeCss = `<style id="clonyfy-static-media-bake">
+.lazy-animation,.lazy-animation:not(.lazy-animation--loaded){opacity:1!important;visibility:visible!important}
+.payments-graphic__background-image,.payments-graphic__background-image-mobile,
+[class*="graphic__background-image"],[class*="-graphic__background"] picture,picture[class*="background"]{display:block!important;opacity:1!important;visibility:visible!important}
+.payments-graphic__background-image img,.payments-graphic__background-image-mobile img,
+[class*="graphic__background-image"] img{opacity:1!important;visibility:visible!important;max-width:100%}
+</style>`;
+
+  if (/<head[^>]*>/i.test(out)) {
+    out = out.replace(/<head[^>]*>/i, (m) => `${m}${bakeCss}`);
+  } else if (/<html[^>]*>/i.test(out)) {
+    out = out.replace(/<html[^>]*>/i, (m) => `${m}<head>${bakeCss}</head>`);
+  } else {
+    out = bakeCss + out;
+  }
+  return out;
 }
 
 /** Brochure assets live in React Router JSON as plain URL strings — not always as <img>/<video> yet. */
@@ -1778,6 +1819,27 @@ export async function capturePage(
       });
     }
 
+    // Stripe/marketing: .lazy-animation stays opacity:0 until site JS adds --loaded.
+    // Preview neutralizes that JS — bake the loaded state into the snapshot.
+    document.querySelectorAll('.lazy-animation').forEach((node) => {
+      const el = node as HTMLElement;
+      el.classList.add('lazy-animation--loaded');
+      el.style.setProperty('opacity', '1', 'important');
+      el.style.setProperty('visibility', 'visible', 'important');
+    });
+    document.querySelectorAll(
+      '[class*="graphic__background-image"],[class*="-graphic__background"] picture,picture[class*="background"]',
+    ).forEach((node) => {
+      const el = node as HTMLElement;
+      el.style.setProperty('display', 'block', 'important');
+      el.style.setProperty('opacity', '1', 'important');
+      el.style.setProperty('visibility', 'visible', 'important');
+    });
+    document.querySelectorAll('img[loading="lazy"]').forEach((node) => {
+      const img = node as HTMLImageElement;
+      try { img.loading = 'eager'; } catch { /* ignore */ }
+    });
+
     document.querySelectorAll('*').forEach((node) => {
       const el = node as HTMLElement;
       if (el.closest(carouselSkip)) return;
@@ -1842,6 +1904,10 @@ export async function capturePage(
       else logger.warn(`  [APP ERROR] ${pageUrl} still showing error boundary after retry`);
     }
   } catch { /* best-effort */ }
+
+  // Static HTML already includes CDN <img>/<picture> URLs; bake visibility so clone
+  // preview shows them without Stripe's lazy-animation JS.
+  finalHtml = bakeStaticMediaVisibility(finalHtml);
 
   // Extract real page links, including SPA routes recorded from pushState/replaceState.
   const origin = new URL(pageUrl).origin;

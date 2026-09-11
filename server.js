@@ -31,7 +31,7 @@ import {
 } from './db.js';
 import { htmlToFigmaSvg, htmlToFigmaScene, exportCloneToFigmaZip, routeToSvgFilename } from './lib/figmaExport.js';
 import { svgToFigmaScene, slimFigmaSceneForTransport } from './lib/figmaSceneGraph.js';
-import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml } from './lib/cloneServePatches.js';
+import { buildVisibilityPatchHtml, buildScrollAnimationsPatchHtml, bakeStaticMediaVisibilityHtml } from './lib/cloneServePatches.js';
 
 const _cjsRequire = createRequire(import.meta.url);
 let bcrypt = null, nodemailer = null, StripeLib = null;
@@ -2210,7 +2210,7 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
     injectScrollReveal = !qualityOn && process.env.CLONYFY_SCROLL_REVEAL !== '0',
     assetContext = null,
   } = options;
-  let out = rewriteBareAssetUrls(html, outDir);
+  let out = bakeStaticMediaVisibilityHtml(rewriteBareAssetUrls(html, outDir));
   // Force-show body even if the original site relies on JS hydration to reveal
   // content. Many SSG/SPA sites ship initial HTML with opacity:0 / visibility:hidden
   // and only reveal once React hydrates — but in a clone the hydration JS often

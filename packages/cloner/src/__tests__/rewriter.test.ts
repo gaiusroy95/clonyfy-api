@@ -188,7 +188,7 @@ describe('rewriteHtml — asset URL rewriting', () => {
     expect(out).not.toContain('__placeholder__');
   });
 
-  it('rewrites Shopify CDN images by pathname when width query differs', () => {
+  it('keeps Shopify CDN images live even when a local asset was captured', () => {
     const html = `<html><head></head><body><img src="https://cdn.shopify.com/b/shopify-brochure2-assets/abc.png?width=421" srcset="https://cdn.shopify.com/b/shopify-brochure2-assets/abc.png?width=842 2x"></body></html>`;
     const out = rewriteHtml(record({
       html,
@@ -197,8 +197,21 @@ describe('rewriteHtml — asset URL rewriting', () => {
         localPath: '/_assets/shopify-abc.png',
       }],
     }), ORIGIN);
-    expect(out).toContain('/_assets/shopify-abc.png');
-    expect(out).not.toContain('cdn.shopify.com');
+    expect(out).toContain('cdn.shopify.com/b/shopify-brochure2-assets/abc.png');
+    expect(out).not.toContain('/_assets/shopify-abc.png');
+  });
+
+  it('keeps Stripe CDN images absolute (static HTML fidelity)', () => {
+    const html = `<html><head></head><body><img src="https://images.stripeassets.com/fzn2n1nzq965/abc/payment-bento-background.jpg?w=860&q=80"></body></html>`;
+    const out = rewriteHtml(record({
+      html,
+      assets: [{
+        originalUrl: 'https://images.stripeassets.com/fzn2n1nzq965/abc/payment-bento-background.jpg?w=860&q=80',
+        localPath: '/_assets/stripe-bg.jpg',
+      }],
+    }), ORIGIN);
+    expect(out).toContain('images.stripeassets.com');
+    expect(out).not.toContain('/_assets/stripe-bg.jpg');
   });
 
   it('injects fallback font styles', () => {
