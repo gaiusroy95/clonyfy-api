@@ -20,12 +20,15 @@
     "smoke:week4": "node scripts/week4-smoke.mjs"
   },
   "dependencies": {
+    "@sparticuz/chromium": "^148.0.0",
     "@supabase/supabase-js": "^2.105.4",
+    "@vercel/functions": "^3.7.5",
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.4.2",
     "nodemailer": "^8.0.7",
     "pg": "^8.16.3",
+    "playwright-core": "^1.44.0",
     "stripe": "^22.1.1"
   }
 }

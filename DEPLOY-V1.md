@@ -1,6 +1,54 @@
 # V1 production deploy (Clone / Editor / Figma / GitHub / ZIP)
 
-## Backend (Render)
+## Backend (Vercel — recommended)
+
+Deploy the **Backend folder/repo as its own Vercel project** (separate from the Frontend site). Frontend keeps `VITE_API_BASE_URL` pointed at this API URL (e.g. `https://api.clonyfy.com`).
+
+### Constraints
+
+- Use **Vercel Pro** (or Fluid) so `maxDuration` can be **300s**. Hobby timeouts are too short for Playwright clones.
+- Clones run **inline** with `@sparticuz/chromium` + `waitUntil` (no child `spawn`).
+- Cap pages via `CLONYFY_SERVERLESS_MAX_PAGES` (default **5** on Vercel). Large Shopify-style sites may still fail or salvage partial HTML.
+- Disk is ephemeral (`/tmp`); durable files must live in **Supabase Storage**.
+
+### Setup
+
+1. Create a new Vercel project from the Backend repo (Root Directory = Backend if monorepo).
+2. Build uses `vercel.json`: `npm install` + `npm run build` (builds `@clonyfy/cloner`). Function entry: `api/index.js` → shared `server.js` handler.
+3. Set env (see `.env.example`):
+
+| Variable | Notes |
+|---|---|
+| `CLONYFY_SERVERLESS=1` | Explicit serverless mode (also auto-detected via `VERCEL`) |
+| `CLONYFY_HOSTED=1` | Hosted preview paths |
+| `CLONYFY_FAST_CLONE=1` | Faster capture budgets |
+| `CLONYFY_LOW_MEMORY=1` | Soft concurrency / exports (auto-on for Vercel unless `=0`) |
+| `CLONYFY_SERVERLESS_MAX_PAGES=5` | Page budget per clone |
+| `APP_URL` | Public API URL (e.g. `https://api.clonyfy.com`) |
+| `FRONTEND_URL` | Live Frontend origin (CORS + redirects) |
+| Supabase / Stripe / auth | Same as local — `SUPABASE_*`, `ADMIN_PASSWORD`, peppers, etc. |
+
+4. Optional: `CLONYFY_CLONE_DEADLINE_MS` (Vercel default ~**240000** ms to fit `maxDuration` 300s).
+5. Point a custom domain at the Backend project if desired.
+
+Local development stays `npm run dev` / `node server.js` (binds a port; skips listen only when `VERCEL` is set).
+
+### Durable clone storage (required on Vercel)
+
+Clones must land in **Supabase Storage** (`clone-files` bucket). Function filesystem is wiped when the isolate ends — only Storage-backed clones stay previewable.
+
+The Backend:
+- Uploads critical HTML during / after the crawl (and mid-clone on hosted/serverless)
+- Refuses to mark a clone **Complete** unless Storage verify passes
+- Remaps `outDir` by folder name if the absolute path changed after redeploy
+
+Confirm the `clone-files` bucket exists and the service role can upload. Check function logs for `[clone storage]`.
+
+---
+
+## Backend (Render — optional / legacy)
+
+Render is **not required** once the Vercel Backend is live. Keep this section if you still run a dedicated Node host.
 
 1. Deploy from the Backend repo so `npm run build` rebuilds `@clonyfy/cloner`.
 2. Required env:
@@ -17,25 +65,14 @@
 
 After deploy, a small clone (about 10 pages or fewer) should finish in about **2-5 minutes**.
 
-### Durable clone storage (important)
-
-Clones must land in **Supabase Storage** (`clone-files` bucket). Render disk is ephemeral — after a restart, only Storage-backed clones stay previewable.
-
-The Backend now:
-- Uploads critical HTML during / after the crawl (and mid-clone on hosted)
-- Refuses to mark a clone **Complete** unless Storage verify passes
-- Remaps `outDir` by folder name if the absolute path changed after redeploy
-
-Confirm in Supabase that the `clone-files` bucket exists and the service role can upload. Check Render logs for `[clone storage]`.
-
-### Keep-warm (free tier cold starts)
+### Keep-warm (Render free tier cold starts)
 
 Render free web services sleep after idle. The Frontend already:
 
 - Pings `GET /api/health` before login/clone and retries on 502/503/504
 - Keep-warms every ~8 minutes while the dashboard auth session is open
 
-For always-warm when no one is using the site, add an external monitor (UptimeRobot, cron-job.org, etc.) hitting:
+For always-warm when no one is using the site, add an external monitor hitting:
 
 `https://YOUR-API.onrender.com/api/health`
 
@@ -43,13 +80,15 @@ every **5–10 minutes**. Health returns `{ ok, lowMemory, cloneConcurrency, mem
 
 ## Frontend (Vercel)
 
-1. Set `VITE_API_BASE_URL` to the Backend URL and **rebuild** (Vite bakes this at build time).
+1. Set `VITE_API_BASE_URL` to the **Backend Vercel URL** (or custom API domain) and **rebuild** (Vite bakes this at build time).
 2. Deploy the Frontend so wake/retry + keep-warm code is live.
+
+Do **not** merge Frontend and Backend into one Vercel project for this setup — they stay separate.
 
 ## Smoke checklist
 
-- Cold start: open login → may wait ~30–90s once, then succeeds (not a stuck spinner forever)
-- Start clone → Complete (or Failed with real error, never fake Complete)
+- Health: `GET /api/health` on the Backend project
+- Start clone → Complete (or Failed with real error, never fake Complete); expect page caps on Vercel
 - Edit pages → Save → preview reflects changes
 - Download ZIP (paid) — still works if Next regen fails (captured HTML fallback)
 - Figma SVG / ZIP (paid)

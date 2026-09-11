@@ -190,33 +190,45 @@ const PLAN_ALIASES = { popular: 'growth', pro: 'growth', scale: 'unlimited', ent
 const LEGACY_PAID_PLAN_KEYS = Object.keys(PLAN_ALIASES);
 const ALL_PAID_PLAN_KEYS = [...PAID_PLAN_KEYS, ...LEGACY_PAID_PLAN_KEYS];
 const IS_RENDER = !!(process.env.RENDER || process.env.RENDER_EXTERNAL_URL);
-/** Opt-in serverless mode (Lambda-style). Render is a dedicated Node host — leave unset. */
-const IS_SERVERLESS = process.env.CLONYFY_SERVERLESS === '1' || process.env.CLONYFY_SERVERLESS === 'true';
-/** Production / Render: serve clone preview via /api/page instead of spawning local Next. */
+const IS_VERCEL = process.env.VERCEL === '1'
+  || process.env.VERCEL === 'true'
+  || !!process.env.VERCEL_ENV;
+/** Serverless = Vercel / Lambda / explicit opt-in. Dedicated Node hosts (Render) leave unset. */
+const IS_SERVERLESS = IS_VERCEL
+  || process.env.CLONYFY_SERVERLESS === '1'
+  || process.env.CLONYFY_SERVERLESS === 'true'
+  || !!process.env.AWS_LAMBDA_FUNCTION_NAME
+  || !!process.env.LAMBDA_TASK_ROOT;
+/** Production / Render / Vercel: serve clone preview via /api/page instead of spawning local Next. */
 const IS_HOSTED = IS_RENDER
+  || IS_VERCEL
   || process.env.CLONYFY_HOSTED === '1'
+  || process.env.CLONYFY_HOSTED === 'true'
   || process.env.NODE_ENV === 'production';
 /**
  * Low-memory / Free-tier mode: prefer concurrency 1 and softer exports.
- * Auto-on for Render unless CLONYFY_LOW_MEMORY=0.
+ * Auto-on for Render/Vercel unless CLONYFY_LOW_MEMORY=0.
  */
 const IS_LOW_MEMORY = process.env.CLONYFY_LOW_MEMORY === '1'
   || process.env.CLONYFY_LOW_MEMORY === 'true'
-  || (IS_RENDER && process.env.CLONYFY_LOW_MEMORY !== '0' && process.env.CLONYFY_LOW_MEMORY !== 'false');
+  || ((IS_RENDER || IS_VERCEL) && process.env.CLONYFY_LOW_MEMORY !== '0' && process.env.CLONYFY_LOW_MEMORY !== 'false');
 /** Inline clone only for serverless (no child process). Render/dedicated hosts spawn the CLI so /api/clone returns immediately and the UI can poll. */
 const USE_INLINE_CLONE = IS_SERVERLESS || process.env.CLONYFY_INLINE_CLONE === '1';
 /** Parallel page capture (1–4). Hosted Free defaults to 1 to avoid OOM during Chromium crawl. */
 const CLONE_CONCURRENCY = Math.max(1, Math.min(4, parseInt(
-  process.env.CLONYFY_CLONE_CONCURRENCY || (IS_HOSTED ? (IS_LOW_MEMORY ? '1' : '2') : '1'),
+  process.env.CLONYFY_CLONE_CONCURRENCY || (IS_HOSTED ? (IS_LOW_MEMORY || IS_SERVERLESS ? '1' : '2') : '1'),
   10,
-) || (IS_HOSTED && !IS_LOW_MEMORY ? 2 : 1)));
-/** Wall-clock limit so jobs cannot spin 60+ minutes with no usable result. */
+) || (IS_HOSTED && !IS_LOW_MEMORY && !IS_SERVERLESS ? 2 : 1)));
+/** Wall-clock limit so jobs cannot spin forever. Vercel maxDuration is ~300s — default ~240s there. */
+const CLONE_DEADLINE_DEFAULT_MS = IS_VERCEL
+  ? 240_000
+  : ((IS_LOW_MEMORY ? 12 : 18) * 60 * 1000);
 const CLONE_DEADLINE_MS = Math.max(
-  5 * 60 * 1000,
-  parseInt(process.env.CLONYFY_CLONE_DEADLINE_MS || String((IS_LOW_MEMORY ? 12 : 18) * 60 * 1000), 10)
-    || ((IS_LOW_MEMORY ? 12 : 18) * 60 * 1000),
+  60_000,
+  parseInt(process.env.CLONYFY_CLONE_DEADLINE_MS || String(CLONE_DEADLINE_DEFAULT_MS), 10)
+    || CLONE_DEADLINE_DEFAULT_MS,
 );
-const SERVERLESS_MAX_PAGES = Math.max(1, parseInt(process.env.CLONYFY_SERVERLESS_MAX_PAGES || '500', 10) || 500);
+const SERVERLESS_MAX_PAGES = Math.max(1, parseInt(process.env.CLONYFY_SERVERLESS_MAX_PAGES || (IS_VERCEL ? '5' : '500'), 10) || (IS_VERCEL ? 5 : 500));
 /** Safety ceiling for Scale "Select all pages" (same-origin deep crawl). Raise on dedicated hosts. */
 const FULL_SITE_MAX_PAGES = Math.max(500, parseInt(process.env.CLONYFY_FULL_SITE_MAX_PAGES || '10000', 10) || 10000);
 const FULL_SITE_DEPTH = Math.max(50, parseInt(process.env.CLONYFY_FULL_SITE_DEPTH || '256', 10) || 256);
@@ -869,7 +881,11 @@ async function checkUsageAlert(userId) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const OUTPUT_DIR = resolve(process.env.CLONYFY_OUTPUT_DIR || './output');
+// Vercel/Lambda: writable space is /tmp only. Local/Render can use ./output.
+const OUTPUT_DIR = resolve(
+  process.env.CLONYFY_OUTPUT_DIR
+    || (IS_SERVERLESS ? join(tmpdir(), 'clonyfy-output') : './output'),
+);
 
 function ensureOutputDir() {
   mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -4229,7 +4245,7 @@ async function handleRequest(req, res) {
           job.logs.push(`[WARN] Full-site clones on serverless are time/disk limited. Prefer a dedicated Node host (Render) and set CLONYFY_FULL_SITE_MAX_PAGES.`);
         }
       } else if (IS_SERVERLESS && requestedMaxPages > job.maxPages) {
-        job.logs.push(`[WARN] Page limit capped to ${job.maxPages} on serverless deployment. Set CLONYFY_SERVERLESS_MAX_PAGES or run on Render for larger clones.`);
+        job.logs.push(`[WARN] Page limit capped to ${job.maxPages} on serverless deployment. Raise CLONYFY_SERVERLESS_MAX_PAGES (within function timeout) or use a dedicated Node host for larger clones.`);
       }
       jobs.set(id, job);
       persistJob(job, { force: true });
@@ -4404,7 +4420,8 @@ async function handleRequest(req, res) {
 
       if (USE_INLINE_CLONE) {
         // Never block the HTTP response on the crawl — Frontend needs job.id immediately to poll.
-        void (async () => {
+        // On Vercel, register with waitUntil so the isolate keeps running after the response.
+        const cloneWork = (async () => {
           const deadlineTimer = setTimeout(() => {
             job.logs.push(`[WARN] Clone deadline (${Math.round(CLONE_DEADLINE_MS / 60000)} min) reached — stopping and salvaging captured pages.`);
             persistJob(job, { force: true });
@@ -4471,6 +4488,17 @@ async function handleRequest(req, res) {
             }
           }
         })();
+        if (IS_VERCEL) {
+          try {
+            const { waitUntil } = await import('@vercel/functions');
+            waitUntil(cloneWork);
+          } catch (err) {
+            console.warn('[vercel] waitUntil unavailable:', err?.message || err);
+            void cloneWork;
+          }
+        } else {
+          void cloneWork;
+        }
       } else {
         const childEnv = {
           ...process.env,
@@ -6705,6 +6733,11 @@ process.on('warning', (w) => {
 });
 
 ensureInit().then(() => {
+  // On Vercel the platform invokes `export default handler` — do not bind a port.
+  if (IS_VERCEL) {
+    console.log(`[clonyfy] Vercel serverless ready (hosted=${IS_HOSTED} lowMemory=${IS_LOW_MEMORY} concurrency=${CLONE_CONCURRENCY} deadlineMs=${CLONE_DEADLINE_MS} output=${OUTPUT_DIR})`);
+    return;
+  }
   // Bind all interfaces so Render/proxy health checks can reach the process.
   createServer(handler).listen(PORT, '0.0.0.0', () => {
     const publicUrl = DEFAULT_APP_URL || `http://localhost:${PORT}`;
@@ -6712,7 +6745,7 @@ ensureInit().then(() => {
     console.log(`Public URL: ${publicUrl}`);
     console.log(`Frontend CORS: ${process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '(not set)'}`);
     console.log(
-      `Hosted=${IS_HOSTED} lowMemory=${IS_LOW_MEMORY} cloneConcurrency=${CLONE_CONCURRENCY} deadlineMs=${CLONE_DEADLINE_MS}\n`,
+      `Hosted=${IS_HOSTED} serverless=${IS_SERVERLESS} lowMemory=${IS_LOW_MEMORY} cloneConcurrency=${CLONE_CONCURRENCY} deadlineMs=${CLONE_DEADLINE_MS}\n`,
     );
   });
 });
