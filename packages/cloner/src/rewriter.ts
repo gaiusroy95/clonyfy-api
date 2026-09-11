@@ -11,47 +11,13 @@ function normalizeAssetLookupUrl(value: string): string {
     .trim();
 }
 
-/** Shopify / Stripe / common CDNs — keep absolute URLs for visual fidelity. */
-export function isLiveCdnImageUrl(value: string): boolean {
-  try {
-    const host = new URL(value).hostname.toLowerCase();
-    return (
-      host === 'cdn.shopify.com'
-      || host.endsWith('.shopify.com')
-      || host.includes('shopifycdn')
-      || host.endsWith('.shopifycloud.com')
-      || host.endsWith('.myshopify.com')
-      || host.endsWith('.stripe.com')
-      || host.endsWith('.stripeassets.com')
-      || host === 'images.stripeassets.com'
-      || host.endsWith('.stripecdn.com')
-      || host.includes('stripe.com')
-      || host.includes('stripeassets.com')
-      || host.includes('stripecdn.com')
-      || host.endsWith('.vercel-storage.com')
-      || host.endsWith('.vercel-insights.com')
-      || /\.(cloudfront|akamaihd|imgix|cloudinary|fastly|b-cdn|cloudflare)\./i.test(host)
-      || host.endsWith('.imgix.net')
-      || host.endsWith('.cloudinary.com')
-      || host.endsWith('.cloudfront.net')
-      || host.endsWith('.akamaihd.net')
-      || host.endsWith('.fastly.net')
-      || host.endsWith('.b-cdn.net')
-      || host.includes('images.unsplash.com')
-      || host.includes('cdn.sanity.io')
-      || host.includes('imagekit.io')
-      || host.includes('res.cloudinary.com')
-    );
-  } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud|stripe\.com|stripeassets\.com|stripecdn\.com|cloudinary|imgix|cloudfront/i.test(String(value || ''));
-  }
-}
-
-/** Absolute http(s) image/video/font URL — keep live for near-identical preview. */
+/**
+ * Absolute http(s) media/font URL — only used when CLONYFY_PREFER_LIVE_MEDIA=1
+ * (explicit opt-in hotlink mode). Default clone path always rewrites to /_assets.
+ */
 export function isPreferLiveMediaUrl(value: string): boolean {
   const raw = String(value || '').trim();
   if (!/^https?:\/\//i.test(raw)) return false;
-  if (isLiveCdnImageUrl(raw)) return true;
   try {
     const path = new URL(raw).pathname.toLowerCase();
     return /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp|mp4|webm|mov|m4v|ogg|ogv|mp3|wav|m4a|woff2?|ttf|otf|eot)(\?|$)/i.test(path)
@@ -61,17 +27,10 @@ export function isPreferLiveMediaUrl(value: string): boolean {
   }
 }
 
+/** Opt-in only. Default is rigorous local /_assets rewrite (no CDN hotlink). */
 function preferLiveMediaEnabled(): boolean {
   const prefer = process.env.CLONYFY_PREFER_LIVE_MEDIA;
-  if (prefer === '0' || prefer === 'false') return false;
-  if (prefer === '1' || prefer === 'true') return true;
-  const quality = process.env.CLONYFY_QUALITY;
-  if (quality === '0' || quality === 'false') return false;
-  if (quality === '1' || quality === 'true') return true;
-  // Default ON in production/runtime. Unit tests (Vitest) keep classic local rewrite
-  // unless they opt in with CLONYFY_PREFER_LIVE_MEDIA=1.
-  if (process.env.VITEST === 'true' || process.env.NODE_ENV === 'test') return false;
-  return true;
+  return prefer === '1' || prefer === 'true';
 }
 
 function buildAssetMap(assets: AssetEntry[]): Map<string, string> {
@@ -114,18 +73,14 @@ function rewriteUrl(value: string, assetMap: Map<string, string>, baseUrl: strin
   if (!value) return value;
   const decoded = normalizeAssetLookupUrl(value);
 
-  // Static HTML already has CDN image URLs (e.g. images.stripeassets.com).
-  // Never rewrite those to /_assets/ — that is the main reason clones look empty.
-  if (/^https?:\/\//i.test(decoded) && isLiveCdnImageUrl(decoded)) {
-    return decoded;
-  }
+  // Explicit opt-in: keep live absolute media URLs (hotlink; CORS-sensitive).
   if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(decoded)) {
     return decoded;
   }
 
   const clean = decoded.split('?')[0].split('#')[0];
 
-  // Direct lookup (absolute URL already in map)
+  // Direct lookup (absolute URL already in map) — prefer local /_assets always.
   if (assetMap.has(value)) return assetMap.get(value)!;
   if (assetMap.has(decoded)) return assetMap.get(decoded)!;
   if (assetMap.has(clean)) return assetMap.get(clean)!;
@@ -133,7 +88,7 @@ function rewriteUrl(value: string, assetMap: Map<string, string>, baseUrl: strin
   // Resolve root-relative and document-relative paths against origin, then look up
   try {
     const abs = new URL(decoded, baseUrl).href;
-    if (isLiveCdnImageUrl(abs) || (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs))) {
+    if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) {
       return abs;
     }
     const absClean = abs.split('?')[0].split('#')[0];
@@ -219,8 +174,7 @@ function assetMapHasUrl(assetMap: Map<string, string>, value: string, baseUrl: s
 
 /**
  * Only treat as "failed" when capture explicitly marked the URL broken.
- * Do NOT blank live CDN URLs (Shopify etc.) — leave them absolute so preview
- * can still load images even if the asset wasn't downloaded into /_assets.
+ * Unmapped external media are left as-is (surfaced via failedAssets when known).
  */
 function isUnresolvedExternalImage(
   _value: string,
@@ -399,8 +353,7 @@ function walkNode(
           continue;
         }
 
-        // Replace failed assets with the local placeholder — except live CDNs
-        // (Shopify etc.): keep the absolute URL so preview can load from the CDN.
+        // Replace failed assets with the local placeholder (site-agnostic).
         try {
           const absUrl = new URL(before, baseUrl).href;
           const failed = failedAssets.has(absUrl) || failedAssets.has(before);
@@ -408,7 +361,7 @@ function walkNode(
             && IMAGE_URL_ATTRS.has(attrName)
             && (tagName === 'img' || tagName === 'source' || tagName === 'video')
             && isUnresolvedExternalImage(before, baseUrl, origin, assetMap);
-          if ((failed || unresolvedExternalImage) && !isLiveCdnImageUrl(absUrl) && !isLiveCdnImageUrl(before)) {
+          if (failed || unresolvedExternalImage) {
             attr.value = PLACEHOLDER_IMAGE_WEB_PATH;
             stats.attrsRewritten++;
             continue;

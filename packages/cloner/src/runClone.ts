@@ -229,6 +229,7 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
         assets: r.assets,
         network: (IS_SERVERLESS || IS_FAST_CLONE) ? [] : r.network,
         failedAssets: r.failedAssets,
+        failedAssetReasons: r.failedAssetReasons,
       })),
     };
     const manifestPath = join(opts.out, 'manifest.json');

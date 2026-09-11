@@ -2228,23 +2228,10 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
   // Resolve the clone's original origin once (used for media rewrite + replay/nav patches).
   const context = assetContext || await buildPreviewAssetContext(outDir);
   const targetOrigin = context.targetOrigin;
-  const originalByRelPath = context.originalByRelPath || {};
 
-  // Restore any /_assets/… that still point at local files back to the live original URL.
-  // This is the main path to near-identical images when serverless offload dropped binaries.
-  if (Object.keys(originalByRelPath).length) {
-    out = out.replace(
-      /([("'=\s,])(\/_assets\/[A-Za-z0-9._~%-]+)(\?[^"'\\\s]*)?/g,
-      (match, pre, assetPath, query = '') => {
-        const key = assetPath.replace(/^\//, '');
-        const original = originalByRelPath[key]
-          || originalByRelPath[`public${assetPath}`]
-          || originalByRelPath[assetPath.replace(/^\/_assets\//, '_assets/')];
-        if (!original || !/^https?:\/\//i.test(original)) return match;
-        return `${pre}${original}`;
-      },
-    );
-  }
+  // Keep /_assets/… same-origin. Do NOT remap captured assets back to origin CDNs
+  // (that caused CORS on fonts and fragile hotlinks). Missing files are served
+  // from Storage via /_assets and /api/asset.
 
   // Point un-captured root-relative media/asset paths back to the original origin.
   // This works in BOTH the preview iframe (`/api/page` src) and the editor iframe
@@ -3705,10 +3692,11 @@ async function handleRequest(req, res) {
     }
     const dirsToTry = getOutputs().map(o => o.dir);
     for (const dir of dirsToTry) {
-      if (!dir) continue;
-      const assetPath = join(dir, 'public', relPath);
-      if (isInsideOutputDir(assetPath) && existsSync(assetPath)) return serveFile(res, assetPath, type, 3600);
+      if (!dir || !isInsideOutputDir(dir)) continue;
+      const stored = await readCloneFile(dir, join('public', relPath));
+      if (stored && await serveCloneAssetBytes(dir, stored)) return;
     }
+    console.warn(`[assets] miss ${relPath} (no local/Storage bytes)`);
     res.writeHead(404); res.end(); return;
   }
 
@@ -3733,13 +3721,14 @@ async function handleRequest(req, res) {
     if (!storageRel) return json(res, { error: 'Invalid asset' }, 400);
     const data = await readCloneFile(outDir, storageRel);
     if (!data) {
-      // Asset wasn't captured (or upload failed). Try to recover by looking
-      // up the original URL from manifest and redirecting the browser to it.
+      // Last resort only: asset missing from disk and Storage. Log and 302 to
+      // original URL if known — prefer re-cloning so assets stay same-origin.
       try {
         const ctx = await buildPreviewAssetContext(outDir);
         const assetKey = storageRel.replace(/^public\//, '');
         const origUrl = ctx.originalByRelPath?.[assetKey] || ctx.originalByRelPath?.[storageRel];
         if (origUrl && /^https?:\/\//.test(origUrl)) {
+          console.warn(`[api/asset] Storage miss for ${storageRel}; last-resort redirect to origin`);
           res.writeHead(302, { Location: origUrl, 'Cache-Control': 'public, max-age=300' });
           res.end();
           return;

@@ -293,61 +293,21 @@ function preferLargestSrcsetCandidate(url: string): string {
   }
 }
 
-function isLiveCdnMediaUrl(url: string): boolean {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    return (
-      host === 'cdn.shopify.com'
-      || host.endsWith('.shopify.com')
-      || host.includes('shopifycdn')
-      || host.endsWith('.shopifycloud.com')
-      || host.endsWith('.myshopify.com')
-      || host.endsWith('.imgix.net')
-      || host.endsWith('.cloudinary.com')
-      || host.endsWith('.stripe.com')
-      || host.endsWith('.stripeassets.com')
-      || host === 'images.stripeassets.com'
-      || host.endsWith('.stripecdn.com')
-      || host.includes('stripe.com')
-      || host.includes('stripeassets.com')
-      || host.includes('stripecdn.com')
-      || host.endsWith('.b-cdn.net')
-      || host.endsWith('.cloudfront.net')
-      || host.endsWith('.akamaihd.net')
-      || host.endsWith('.fastly.net')
-      || host.includes('cdn.sanity.io')
-      || host.includes('imagekit.io')
-      || host.includes('images.unsplash.com')
-    );
-  } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud|images\.stripe|stripeassets\.com|stripecdn\.com|cloudinary|imgix/i.test(url);
-  }
-}
-
 /**
- * Bake media visibility into captured HTML itself.
- * Stripe static HTML already has <picture>/<img> CDN URLs, but CSS keeps them
- * at opacity:0 / display:none until JS runs — and clone preview disables that JS.
+ * Bake media visibility into captured HTML (site-agnostic).
+ * Preview neutralizes site JS, so force eager media load and reveal
+ * opacity/visibility-hidden media containers without brand class names.
  */
 export function bakeStaticMediaVisibility(html: string): string {
   let out = String(html || '');
   if (!out || /id=["']clonyfy-static-media-bake["']/.test(out)) return out;
 
-  // Mark lazy-animation nodes as loaded in the class list.
-  out = out.replace(
-    /\bclass=(["'])([^"']*\blazy-animation\b(?![^"']*\blazy-animation--loaded\b)[^"']*)\1/gi,
-    (_m, q, cls) => `class=${q}${cls} lazy-animation--loaded${q}`,
-  );
-
   // Prefer eager loading so preview does not wait for IO that never fires.
   out = out.replace(/\sloading=(["'])lazy\1/gi, ' loading="eager"');
 
   const bakeCss = `<style id="clonyfy-static-media-bake">
-.lazy-animation,.lazy-animation:not(.lazy-animation--loaded){opacity:1!important;visibility:visible!important}
-.payments-graphic__background-image,.payments-graphic__background-image-mobile,
-[class*="graphic__background-image"],[class*="-graphic__background"] picture,picture[class*="background"]{display:block!important;opacity:1!important;visibility:visible!important}
-.payments-graphic__background-image img,.payments-graphic__background-image-mobile img,
-[class*="graphic__background-image"] img{opacity:1!important;visibility:visible!important;max-width:100%}
+img,picture,video,source{opacity:1!important;visibility:visible!important}
+img[hidden],picture[hidden],video[hidden]{display:revert!important}
 </style>`;
 
   if (/<head[^>]*>/i.test(out)) {
@@ -577,6 +537,12 @@ export async function capturePage(
   const cssFilesForRewrite = new Map<string, { localPath: string; cssText: string; sourceUrl: string }>();
 
   const failedAssets = new Set<string>();
+  const failedAssetReasons: Record<string, string> = {};
+  const markFailed = (url: string, reason: string) => {
+    if (!url) return;
+    failedAssets.add(url);
+    if (!failedAssetReasons[url]) failedAssetReasons[url] = reason;
+  };
   let assetsIntercepted = 0;
   let assetsSaved = 0;
   let assetsSkipped = 0;
@@ -629,6 +595,7 @@ export async function capturePage(
     const maxBytes = (forceCss || contentType.includes('text/css')) ? MAX_CSS_BYTES : maxAssetBytes;
     if (body.length > maxBytes) {
       logger.debug(`  [ASSET SKIP] ${url} - too large (${(body.length / 1024 / 1024).toFixed(1)}MB > ${(maxBytes / 1024 / 1024).toFixed(0)}MB)`);
+      markFailed(url, 'too_large');
       return null;
     }
     try {
@@ -644,9 +611,13 @@ export async function capturePage(
 
       const isCss = forceCss || ext === '.css' || contentType.includes('text/css');
       const isFont = contentType.includes('font') || /\.(woff2?|ttf|otf|eot)(\?|$)/i.test(ext);
+      const isImage = contentType.startsWith('image/')
+        || /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp)(\?|$)/i.test(ext);
       const needsWrite = !existsSync(localPath);
-      if (needsWrite && !reserveServerlessAssetBytes(body.length, { priority: isCss || isFont })) {
+      // Prioritize CSS, fonts, and images so soft budget does not drop visible media.
+      if (needsWrite && !reserveServerlessAssetBytes(body.length, { priority: isCss || isFont || isImage })) {
         logger.warn(`  [ASSET BUDGET] Skipping ${url.split('/').pop()} — serverless asset budget (${Math.round(SERVERLESS_ASSET_BUDGET_BYTES / 1024 / 1024)} MB) reached`);
+        markFailed(url, 'budget');
         return null;
       }
 
@@ -687,6 +658,7 @@ export async function capturePage(
       return webPath;
     } catch (err) {
       logger.warn(`  [ASSET FAIL] ${url}: ${(err as Error).message}`);
+      markFailed(url, 'error');
       return null;
     }
   }
@@ -708,6 +680,7 @@ export async function capturePage(
           const r = await fetch(absUrl, { headers: assetFetchHeaders(pageUrl), signal: AbortSignal.timeout(10_000) });
           if (!r.ok) {
             logger.debug(`  [CSS REF FAIL] ${absUrl} -> HTTP ${r.status}`);
+            markFailed(absUrl, `http_status:${r.status}`);
             return;
           }
 
@@ -718,6 +691,7 @@ export async function capturePage(
           const len = Number(r.headers.get('content-length') || 0);
           if (len > maxBytes) {
             logger.debug(`  [CSS REF SKIP] ${absUrl} - too large (${(len / 1024 / 1024).toFixed(1)}MB > ${(maxBytes / 1024 / 1024).toFixed(0)}MB)`);
+            markFailed(absUrl, 'too_large');
             return;
           }
 
@@ -725,6 +699,7 @@ export async function capturePage(
           const saved = await saveAsset(absUrl, subBuf, contentType, isCssRef);
           if (!saved) {
             logger.debug(`  [CSS REF SKIP] ${absUrl}`);
+            if (!failedAssets.has(absUrl)) markFailed(absUrl, 'error');
             return;
           }
 
@@ -732,7 +707,12 @@ export async function capturePage(
             enqueueCssReferences(subBuf.toString('utf8'), absUrl);
           }
         } catch (err) {
-          logger.debug(`  [CSS REF ERR] ${cssUrl}: ${(err as Error).message}`);
+          const msg = (err as Error).message || '';
+          try {
+            const absUrl = new URL(cssUrl, sourceUrl).href;
+            markFailed(absUrl, /timeout|aborted|AbortError/i.test(msg) ? 'timeout' : 'error');
+          } catch { /* ignore */ }
+          logger.debug(`  [CSS REF ERR] ${cssUrl}: ${msg}`);
         }
       });
     }
@@ -803,14 +783,7 @@ export async function capturePage(
       : contentType;
 
     if (status >= 400 && isImageLikeRequest(url, resourceType)) {
-      // Shopify/CDN hotlink or transient 403/404: do NOT mark failed — leave the
-      // absolute CDN URL in HTML so preview can still load the live image.
-      if (isLiveCdnMediaUrl(url)) {
-        logger.debug(`  [CDN IMAGE KEEP] ${url} -> HTTP ${status} (keeping live URL)`);
-        await route.fulfill({ response }).catch(async () => { await route.abort().catch(() => {}); });
-        return;
-      }
-      failedAssets.add(url);
+      markFailed(url, `http_status:${status}`);
       logger.debug(`  [IMAGE FALLBACK] ${url} -> HTTP ${status}, substituting placeholder`);
       await route.fulfill({ status: 200, contentType: 'image/svg+xml', body: PLACEHOLDER_IMAGE_BODY });
       return;
@@ -1109,30 +1082,28 @@ export async function capturePage(
             const len = Number(r.headers.get('content-length') || 0);
             if (len > maxAssetBytes) {
               logger.debug(`  [DOM ASSET SKIP] ${absUrl} - too large (${(len / 1024 / 1024).toFixed(1)}MB > ${(maxAssetBytes / 1024 / 1024).toFixed(0)}MB)`);
+              markFailed(absUrl, 'too_large');
               return;
             }
             const buf = Buffer.from(await r.arrayBuffer());
             if (buf.length > maxAssetBytes) {
               logger.debug(`  [DOM ASSET SKIP] ${absUrl} - body too large`);
+              markFailed(absUrl, 'too_large');
               return;
             }
             await saveAsset(absUrl, buf, contentType);
           } else if (r.status >= 400 && r.status < 500) {
-            // Only mark definitive client errors as failed (not timeouts / 5xx).
-            // Never fail live Shopify/CDN URLs — preview can still load them.
-            if (isLiveCdnMediaUrl(absUrl)) {
-              logger.debug(`  [CDN IMAGE KEEP] ${absUrl} -> HTTP ${r.status}`);
-            } else {
-              logger.debug(`  [DOM ASSET MISSING] ${absUrl} -> HTTP ${r.status}`);
-              failedAssets.add(absUrl);
-            }
+            logger.debug(`  [DOM ASSET MISSING] ${absUrl} -> HTTP ${r.status}`);
+            markFailed(absUrl, `http_status:${r.status}`);
           } else {
             logger.debug(`  [DOM ASSET SKIP] ${absUrl} -> HTTP ${r.status}`);
+            markFailed(absUrl, `http_status:${r.status}`);
           }
         } catch (err) {
-          // Timeouts / network blips must NOT mark the asset failed — rewriter
-          // would replace live Shopify CDN URLs with placeholders.
-          logger.debug(`  [DOM ASSET ERR] ${u}: ${(err as Error).message}`);
+          const msg = (err as Error).message || '';
+          const reason = /timeout|aborted|AbortError/i.test(msg) ? 'timeout' : 'error';
+          markFailed(u, reason);
+          logger.debug(`  [DOM ASSET ERR] ${u}: ${msg}`);
         }
       });
     }
@@ -1330,17 +1301,19 @@ export async function capturePage(
               const contentType = r.headers.get('content-type') ?? '';
               if (contentType.includes('text/html')) return;
               const len = Number(r.headers.get('content-length') || 0);
-              if (len > maxAssetBytes) return;
+              if (len > maxAssetBytes) {
+                markFailed(absUrl, 'too_large');
+                return;
+              }
               const buf = Buffer.from(await r.arrayBuffer());
               await saveAsset(absUrl, buf, contentType);
-            } else if (r.status >= 400 && r.status < 500) {
-              if (isLiveCdnMediaUrl(absUrl)) {
-                logger.debug(`  [CDN IMAGE KEEP] ${absUrl} -> HTTP ${r.status}`);
-              } else {
-                failedAssets.add(absUrl);
-              }
+            } else if (r.status >= 400) {
+              markFailed(absUrl, `http_status:${r.status}`);
             }
-          } catch { /* best-effort — do not mark failed on timeout */ }
+          } catch (err) {
+            const msg = (err as Error).message || '';
+            markFailed(u, /timeout|aborted|AbortError/i.test(msg) ? 'timeout' : 'error');
+          }
         });
       }
     }
@@ -1819,25 +1792,34 @@ export async function capturePage(
       });
     }
 
-    // Stripe/marketing: .lazy-animation stays opacity:0 until site JS adds --loaded.
-    // Preview neutralizes that JS — bake the loaded state into the snapshot.
-    document.querySelectorAll('.lazy-animation').forEach((node) => {
-      const el = node as HTMLElement;
-      el.classList.add('lazy-animation--loaded');
-      el.style.setProperty('opacity', '1', 'important');
-      el.style.setProperty('visibility', 'visible', 'important');
+    // Site-agnostic: reveal opacity/visibility-hidden nodes that contain media.
+    // Do not invent brand-specific loaded class names.
+    document.querySelectorAll('img[loading="lazy"],source[loading="lazy"]').forEach((node) => {
+      const el = node as HTMLImageElement;
+      try { el.loading = 'eager'; } catch { /* ignore */ }
     });
-    document.querySelectorAll(
-      '[class*="graphic__background-image"],[class*="-graphic__background"] picture,picture[class*="background"]',
-    ).forEach((node) => {
+    document.querySelectorAll('img,picture,video').forEach((node) => {
       const el = node as HTMLElement;
-      el.style.setProperty('display', 'block', 'important');
-      el.style.setProperty('opacity', '1', 'important');
-      el.style.setProperty('visibility', 'visible', 'important');
-    });
-    document.querySelectorAll('img[loading="lazy"]').forEach((node) => {
-      const img = node as HTMLImageElement;
-      try { img.loading = 'eager'; } catch { /* ignore */ }
+      if (el.closest(carouselSkip)) return;
+      const cs = window.getComputedStyle(el);
+      if (cs.opacity === '0' || parseFloat(cs.opacity) < 0.05) {
+        el.style.setProperty('opacity', '1', 'important');
+      }
+      if (cs.visibility === 'hidden') {
+        el.style.setProperty('visibility', 'visible', 'important');
+      }
+      // Walk parents that only hide media (opacity/visibility), not display:none layout switches.
+      let parent = el.parentElement;
+      for (let i = 0; parent && i < 4; i++, parent = parent.parentElement) {
+        if (parent.closest(carouselSkip)) break;
+        const pcs = window.getComputedStyle(parent);
+        if (pcs.opacity === '0' || parseFloat(pcs.opacity) < 0.05) {
+          parent.style.setProperty('opacity', '1', 'important');
+        }
+        if (pcs.visibility === 'hidden') {
+          parent.style.setProperty('visibility', 'visible', 'important');
+        }
+      }
     });
 
     document.querySelectorAll('*').forEach((node) => {
@@ -1905,8 +1887,7 @@ export async function capturePage(
     }
   } catch { /* best-effort */ }
 
-  // Static HTML already includes CDN <img>/<picture> URLs; bake visibility so clone
-  // preview shows them without Stripe's lazy-animation JS.
+  // Bake generic media visibility so clone preview shows media without site JS.
   finalHtml = bakeStaticMediaVisibility(finalHtml);
 
   // Extract real page links, including SPA routes recorded from pushState/replaceState.
@@ -2025,7 +2006,15 @@ export async function capturePage(
   );
 
   return {
-    record: { url: pageUrl, route, html: finalHtml, assets, network: networkLog, failedAssets: [...failedAssets] },
+    record: {
+      url: pageUrl,
+      route,
+      html: finalHtml,
+      assets,
+      network: networkLog,
+      failedAssets: [...failedAssets],
+      failedAssetReasons: { ...failedAssetReasons },
+    },
     links: [...new Set(links)],
     navLinks: [...new Set(navLinks)],
   };

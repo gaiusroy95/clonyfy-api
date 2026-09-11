@@ -20,7 +20,7 @@ Deploy the **Backend folder/repo as its own Vercel project** (separate from the 
 | Variable | Notes |
 |---|---|
 | `CLONYFY_QUALITY=1` | **Default.** Near-identical capture (desktop budgets, live media URLs). Set `0` only for emergency low-RAM |
-| `CLONYFY_PREFER_LIVE_MEDIA=1` | Keep absolute CDN/image URLs in HTML (default with quality) |
+| `CLONYFY_PREFER_LIVE_MEDIA=1` | Opt-in CDN hotlink (not recommended; causes font CORS). Default is local `/_assets` |
 | `CLONYFY_SERVERLESS=1` | Explicit serverless mode (also auto-detected via `VERCEL`) |
 | `CLONYFY_HOSTED=1` | Hosted preview paths |
 | `CLONYFY_LOW_MEMORY=1` | Soft concurrency / exports (auto-on for Vercel unless `=0`) |

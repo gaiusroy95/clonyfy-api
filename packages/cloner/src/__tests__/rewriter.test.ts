@@ -60,8 +60,7 @@ describe('rewriteHtml — CSP meta tag removal', () => {
 describe('rewriteHtml — asset URL rewriting', () => {
   const prevPrefer = process.env.CLONYFY_PREFER_LIVE_MEDIA;
   beforeEach(() => {
-    // Local-rewrite assertions need offline mode; quality default keeps live URLs.
-    process.env.CLONYFY_PREFER_LIVE_MEDIA = '0';
+    delete process.env.CLONYFY_PREFER_LIVE_MEDIA;
   });
   afterEach(() => {
     if (prevPrefer === undefined) delete process.env.CLONYFY_PREFER_LIVE_MEDIA;
@@ -78,7 +77,7 @@ describe('rewriteHtml — asset URL rewriting', () => {
     expect(out).not.toContain('https://example.com/photo.jpg');
   });
 
-  it('quality mode keeps live absolute image URLs for fidelity', () => {
+  it('prefer-live opt-in keeps absolute image URLs', () => {
     process.env.CLONYFY_PREFER_LIVE_MEDIA = '1';
     const html = `<html><head></head><body><img src="https://example.com/photo.jpg"></body></html>`;
     const out = rewriteHtml(record({
@@ -171,24 +170,30 @@ describe('rewriteHtml — asset URL rewriting', () => {
     expect(out).not.toContain('broken.jpg');
   });
 
-  it('keeps live external CDN images when not captured (Shopify etc.)', () => {
+  it('rewrites captured CDN images to /_assets (default local clone)', () => {
     const html = `<html><head></head><body><img src="https://cdn.shopify.com/b/shopify-brochure2-assets/abc.png?width=421"></body></html>`;
-    const out = rewriteHtml(record({ html }), ORIGIN);
-    expect(out).toContain('cdn.shopify.com/b/shopify-brochure2-assets/abc.png');
-    expect(out).not.toContain('__placeholder__');
+    const out = rewriteHtml(record({
+      html,
+      assets: [{
+        originalUrl: 'https://cdn.shopify.com/b/shopify-brochure2-assets/abc.png?width=421',
+        localPath: '/_assets/shopify-abc.png',
+      }],
+    }), ORIGIN);
+    expect(out).toContain('/_assets/shopify-abc.png');
+    expect(out).not.toContain('cdn.shopify.com');
   });
 
-  it('keeps Shopify CDN images even when capture marked them failed', () => {
+  it('uses placeholder for failed CDN images (no hotlink bypass)', () => {
     const html = `<html><head></head><body><img src="https://cdn.shopify.com/s/files/1/abc/hero.webp?width=1200"></body></html>`;
     const out = rewriteHtml(record({
       html,
       failedAssets: ['https://cdn.shopify.com/s/files/1/abc/hero.webp?width=1200'],
     }), ORIGIN);
-    expect(out).toContain('cdn.shopify.com/s/files/1/abc/hero.webp');
-    expect(out).not.toContain('__placeholder__');
+    expect(out).toContain('/_assets/__placeholder__.svg');
+    expect(out).not.toContain('cdn.shopify.com');
   });
 
-  it('keeps Shopify CDN images live even when a local asset was captured', () => {
+  it('rewrites CDN images when a local asset was captured', () => {
     const html = `<html><head></head><body><img src="https://cdn.shopify.com/b/shopify-brochure2-assets/abc.png?width=421" srcset="https://cdn.shopify.com/b/shopify-brochure2-assets/abc.png?width=842 2x"></body></html>`;
     const out = rewriteHtml(record({
       html,
@@ -197,21 +202,41 @@ describe('rewriteHtml — asset URL rewriting', () => {
         localPath: '/_assets/shopify-abc.png',
       }],
     }), ORIGIN);
-    expect(out).toContain('cdn.shopify.com/b/shopify-brochure2-assets/abc.png');
-    expect(out).not.toContain('/_assets/shopify-abc.png');
+    expect(out).toContain('/_assets/shopify-abc.png');
+    expect(out).not.toContain('cdn.shopify.com');
   });
 
-  it('keeps Stripe CDN images absolute (static HTML fidelity)', () => {
-    const html = `<html><head></head><body><img src="https://images.stripeassets.com/fzn2n1nzq965/abc/payment-bento-background.jpg?w=860&q=80"></body></html>`;
+  it('rewrites third-party CDN images and fonts to /_assets when captured', () => {
+    const html = `<html><head><link rel="stylesheet" href="https://b.examplecdn.com/fonts.css"><style>@font-face{src:url('https://b.examplecdn.com/icon.woff2')}</style></head><body><img src="https://images.examplecdn.com/hero.jpg?w=860"></body></html>`;
     const out = rewriteHtml(record({
       html,
-      assets: [{
-        originalUrl: 'https://images.stripeassets.com/fzn2n1nzq965/abc/payment-bento-background.jpg?w=860&q=80',
-        localPath: '/_assets/stripe-bg.jpg',
-      }],
+      assets: [
+        {
+          originalUrl: 'https://images.examplecdn.com/hero.jpg?w=860',
+          localPath: '/_assets/hero.jpg',
+        },
+        {
+          originalUrl: 'https://b.examplecdn.com/fonts.css',
+          localPath: '/_assets/fonts.css',
+        },
+        {
+          originalUrl: 'https://b.examplecdn.com/icon.woff2',
+          localPath: '/_assets/icon.woff2',
+        },
+      ],
     }), ORIGIN);
-    expect(out).toContain('images.stripeassets.com');
-    expect(out).not.toContain('/_assets/stripe-bg.jpg');
+    expect(out).toContain('/_assets/hero.jpg');
+    expect(out).toContain('/_assets/fonts.css');
+    expect(out).toContain('/_assets/icon.woff2');
+    expect(out).not.toContain('images.examplecdn.com');
+    expect(out).not.toContain('b.examplecdn.com/icon.woff2');
+  });
+
+  it('leaves uncaptured external CDN images absolute (not rewritten to placeholder)', () => {
+    const html = `<html><head></head><body><img src="https://cdn.example.com/uncaptured.png"></body></html>`;
+    const out = rewriteHtml(record({ html }), ORIGIN);
+    expect(out).toContain('cdn.example.com/uncaptured.png');
+    expect(out).not.toContain('__placeholder__');
   });
 
   it('injects fallback font styles', () => {

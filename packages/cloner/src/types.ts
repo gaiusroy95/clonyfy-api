@@ -36,7 +36,9 @@ export interface PageRecord {
   html: string;    // rewritten HTML
   assets: AssetEntry[];
   network: NetworkEntry[];
-  failedAssets?: string[]; // URLs that returned non-2xx during capture
+  failedAssets?: string[]; // URLs that could not be saved locally
+  /** Per-URL failure reason: budget | http_status | timeout | too_large | error */
+  failedAssetReasons?: Record<string, string>;
 }
 
 export interface Manifest {

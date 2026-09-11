@@ -1448,28 +1448,13 @@ function preferLargestSrcsetCandidate(url) {
     return url;
   }
 }
-function isLiveCdnMediaUrl(url) {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com") || host.endsWith(".stripe.com") || host.endsWith(".stripeassets.com") || host === "images.stripeassets.com" || host.endsWith(".stripecdn.com") || host.includes("stripe.com") || host.includes("stripeassets.com") || host.includes("stripecdn.com") || host.endsWith(".b-cdn.net") || host.endsWith(".cloudfront.net") || host.endsWith(".akamaihd.net") || host.endsWith(".fastly.net") || host.includes("cdn.sanity.io") || host.includes("imagekit.io") || host.includes("images.unsplash.com");
-  } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud|images\.stripe|stripeassets\.com|stripecdn\.com|cloudinary|imgix/i.test(url);
-  }
-}
 function bakeStaticMediaVisibility(html) {
   let out = String(html || "");
   if (!out || /id=["']clonyfy-static-media-bake["']/.test(out)) return out;
-  out = out.replace(
-    /\bclass=(["'])([^"']*\blazy-animation\b(?![^"']*\blazy-animation--loaded\b)[^"']*)\1/gi,
-    (_m, q, cls) => `class=${q}${cls} lazy-animation--loaded${q}`
-  );
   out = out.replace(/\sloading=(["'])lazy\1/gi, ' loading="eager"');
   const bakeCss = `<style id="clonyfy-static-media-bake">
-.lazy-animation,.lazy-animation:not(.lazy-animation--loaded){opacity:1!important;visibility:visible!important}
-.payments-graphic__background-image,.payments-graphic__background-image-mobile,
-[class*="graphic__background-image"],[class*="-graphic__background"] picture,picture[class*="background"]{display:block!important;opacity:1!important;visibility:visible!important}
-.payments-graphic__background-image img,.payments-graphic__background-image-mobile img,
-[class*="graphic__background-image"] img{opacity:1!important;visibility:visible!important;max-width:100%}
+img,picture,video,source{opacity:1!important;visibility:visible!important}
+img[hidden],picture[hidden],video[hidden]{display:revert!important}
 </style>`;
   if (/<head[^>]*>/i.test(out)) {
     out = out.replace(/<head[^>]*>/i, (m) => `${m}${bakeCss}`);
@@ -1647,6 +1632,12 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
   const consoleErrors = [];
   const cssFilesForRewrite = /* @__PURE__ */ new Map();
   const failedAssets = /* @__PURE__ */ new Set();
+  const failedAssetReasons = {};
+  const markFailed = (url, reason) => {
+    if (!url) return;
+    failedAssets.add(url);
+    if (!failedAssetReasons[url]) failedAssetReasons[url] = reason;
+  };
   let assetsIntercepted = 0;
   let assetsSaved = 0;
   let assetsSkipped = 0;
@@ -1690,6 +1681,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     const maxBytes = forceCss || contentType.includes("text/css") ? MAX_CSS_BYTES : maxAssetBytes;
     if (body.length > maxBytes) {
       logger.debug(`  [ASSET SKIP] ${url} - too large (${(body.length / 1024 / 1024).toFixed(1)}MB > ${(maxBytes / 1024 / 1024).toFixed(0)}MB)`);
+      markFailed(url, "too_large");
       return null;
     }
     try {
@@ -1704,9 +1696,11 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       mkdirSync3(assetsDir, { recursive: true });
       const isCss = forceCss || ext === ".css" || contentType.includes("text/css");
       const isFont = contentType.includes("font") || /\.(woff2?|ttf|otf|eot)(\?|$)/i.test(ext);
+      const isImage = contentType.startsWith("image/") || /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp)(\?|$)/i.test(ext);
       const needsWrite = !existsSync2(localPath);
-      if (needsWrite && !reserveServerlessAssetBytes(body.length, { priority: isCss || isFont })) {
+      if (needsWrite && !reserveServerlessAssetBytes(body.length, { priority: isCss || isFont || isImage })) {
         logger.warn(`  [ASSET BUDGET] Skipping ${url.split("/").pop()} \u2014 serverless asset budget (${Math.round(SERVERLESS_ASSET_BUDGET_BYTES / 1024 / 1024)} MB) reached`);
+        markFailed(url, "budget");
         return null;
       }
       if (isCss) {
@@ -1745,6 +1739,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       return webPath;
     } catch (err) {
       logger.warn(`  [ASSET FAIL] ${url}: ${err.message}`);
+      markFailed(url, "error");
       return null;
     }
   }
@@ -1763,6 +1758,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           const r = await fetch(absUrl, { headers: assetFetchHeaders(pageUrl), signal: AbortSignal.timeout(1e4) });
           if (!r.ok) {
             logger.debug(`  [CSS REF FAIL] ${absUrl} -> HTTP ${r.status}`);
+            markFailed(absUrl, `http_status:${r.status}`);
             return;
           }
           const contentType = r.headers.get("content-type") ?? "";
@@ -1772,19 +1768,27 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           const len = Number(r.headers.get("content-length") || 0);
           if (len > maxBytes) {
             logger.debug(`  [CSS REF SKIP] ${absUrl} - too large (${(len / 1024 / 1024).toFixed(1)}MB > ${(maxBytes / 1024 / 1024).toFixed(0)}MB)`);
+            markFailed(absUrl, "too_large");
             return;
           }
           const subBuf = Buffer.from(await r.arrayBuffer());
           const saved = await saveAsset(absUrl, subBuf, contentType, isCssRef);
           if (!saved) {
             logger.debug(`  [CSS REF SKIP] ${absUrl}`);
+            if (!failedAssets.has(absUrl)) markFailed(absUrl, "error");
             return;
           }
           if (isCssRef && subBuf.length < CSS_REF_SCAN_MAX_BYTES) {
             enqueueCssReferences(subBuf.toString("utf8"), absUrl);
           }
         } catch (err) {
-          logger.debug(`  [CSS REF ERR] ${cssUrl}: ${err.message}`);
+          const msg = err.message || "";
+          try {
+            const absUrl = new URL(cssUrl, sourceUrl).href;
+            markFailed(absUrl, /timeout|aborted|AbortError/i.test(msg) ? "timeout" : "error");
+          } catch {
+          }
+          logger.debug(`  [CSS REF ERR] ${cssUrl}: ${msg}`);
         }
       });
     }
@@ -1840,15 +1844,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     const isCss = isStylesheetRequest || contentType.includes("text/css") || _pathExt === ".css";
     const loggedContentType = isCss && !contentType.includes("text/css") ? "text/css; charset=utf-8" : contentType;
     if (status >= 400 && isImageLikeRequest(url, resourceType)) {
-      if (isLiveCdnMediaUrl(url)) {
-        logger.debug(`  [CDN IMAGE KEEP] ${url} -> HTTP ${status} (keeping live URL)`);
-        await route.fulfill({ response }).catch(async () => {
-          await route.abort().catch(() => {
-          });
-        });
-        return;
-      }
-      failedAssets.add(url);
+      markFailed(url, `http_status:${status}`);
       logger.debug(`  [IMAGE FALLBACK] ${url} -> HTTP ${status}, substituting placeholder`);
       await route.fulfill({ status: 200, contentType: "image/svg+xml", body: PLACEHOLDER_IMAGE_BODY });
       return;
@@ -2118,26 +2114,28 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
               const len = Number(r.headers.get("content-length") || 0);
               if (len > maxAssetBytes) {
                 logger.debug(`  [DOM ASSET SKIP] ${absUrl} - too large (${(len / 1024 / 1024).toFixed(1)}MB > ${(maxAssetBytes / 1024 / 1024).toFixed(0)}MB)`);
+                markFailed(absUrl, "too_large");
                 return;
               }
               const buf = Buffer.from(await r.arrayBuffer());
               if (buf.length > maxAssetBytes) {
                 logger.debug(`  [DOM ASSET SKIP] ${absUrl} - body too large`);
+                markFailed(absUrl, "too_large");
                 return;
               }
               await saveAsset(absUrl, buf, contentType);
             } else if (r.status >= 400 && r.status < 500) {
-              if (isLiveCdnMediaUrl(absUrl)) {
-                logger.debug(`  [CDN IMAGE KEEP] ${absUrl} -> HTTP ${r.status}`);
-              } else {
-                logger.debug(`  [DOM ASSET MISSING] ${absUrl} -> HTTP ${r.status}`);
-                failedAssets.add(absUrl);
-              }
+              logger.debug(`  [DOM ASSET MISSING] ${absUrl} -> HTTP ${r.status}`);
+              markFailed(absUrl, `http_status:${r.status}`);
             } else {
               logger.debug(`  [DOM ASSET SKIP] ${absUrl} -> HTTP ${r.status}`);
+              markFailed(absUrl, `http_status:${r.status}`);
             }
           } catch (err) {
-            logger.debug(`  [DOM ASSET ERR] ${u}: ${err.message}`);
+            const msg = err.message || "";
+            const reason = /timeout|aborted|AbortError/i.test(msg) ? "timeout" : "error";
+            markFailed(u, reason);
+            logger.debug(`  [DOM ASSET ERR] ${u}: ${msg}`);
           }
         });
       }
@@ -2322,17 +2320,18 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
                 const contentType = r.headers.get("content-type") ?? "";
                 if (contentType.includes("text/html")) return;
                 const len = Number(r.headers.get("content-length") || 0);
-                if (len > maxAssetBytes) return;
+                if (len > maxAssetBytes) {
+                  markFailed(absUrl, "too_large");
+                  return;
+                }
                 const buf = Buffer.from(await r.arrayBuffer());
                 await saveAsset(absUrl, buf, contentType);
-              } else if (r.status >= 400 && r.status < 500) {
-                if (isLiveCdnMediaUrl(absUrl)) {
-                  logger.debug(`  [CDN IMAGE KEEP] ${absUrl} -> HTTP ${r.status}`);
-                } else {
-                  failedAssets.add(absUrl);
-                }
+              } else if (r.status >= 400) {
+                markFailed(absUrl, `http_status:${r.status}`);
               }
-            } catch {
+            } catch (err) {
+              const msg = err.message || "";
+              markFailed(u, /timeout|aborted|AbortError/i.test(msg) ? "timeout" : "error");
             }
           });
         }
@@ -2773,25 +2772,33 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           el.style.setProperty("transform", "none", "important");
         });
       }
-      document.querySelectorAll(".lazy-animation").forEach((node) => {
+      document.querySelectorAll('img[loading="lazy"],source[loading="lazy"]').forEach((node) => {
         const el = node;
-        el.classList.add("lazy-animation--loaded");
-        el.style.setProperty("opacity", "1", "important");
-        el.style.setProperty("visibility", "visible", "important");
-      });
-      document.querySelectorAll(
-        '[class*="graphic__background-image"],[class*="-graphic__background"] picture,picture[class*="background"]'
-      ).forEach((node) => {
-        const el = node;
-        el.style.setProperty("display", "block", "important");
-        el.style.setProperty("opacity", "1", "important");
-        el.style.setProperty("visibility", "visible", "important");
-      });
-      document.querySelectorAll('img[loading="lazy"]').forEach((node) => {
-        const img = node;
         try {
-          img.loading = "eager";
+          el.loading = "eager";
         } catch {
+        }
+      });
+      document.querySelectorAll("img,picture,video").forEach((node) => {
+        const el = node;
+        if (el.closest(carouselSkip)) return;
+        const cs = window.getComputedStyle(el);
+        if (cs.opacity === "0" || parseFloat(cs.opacity) < 0.05) {
+          el.style.setProperty("opacity", "1", "important");
+        }
+        if (cs.visibility === "hidden") {
+          el.style.setProperty("visibility", "visible", "important");
+        }
+        let parent = el.parentElement;
+        for (let i = 0; parent && i < 4; i++, parent = parent.parentElement) {
+          if (parent.closest(carouselSkip)) break;
+          const pcs = window.getComputedStyle(parent);
+          if (pcs.opacity === "0" || parseFloat(pcs.opacity) < 0.05) {
+            parent.style.setProperty("opacity", "1", "important");
+          }
+          if (pcs.visibility === "hidden") {
+            parent.style.setProperty("visibility", "visible", "important");
+          }
         }
       });
       document.querySelectorAll("*").forEach((node) => {
@@ -2946,7 +2953,15 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     links_found=${links.length} console_errors=${consoleErrors.length}`
     );
     return {
-      record: { url: pageUrl, route, html: finalHtml, assets, network: networkLog, failedAssets: [...failedAssets] },
+      record: {
+        url: pageUrl,
+        route,
+        html: finalHtml,
+        assets,
+        network: networkLog,
+        failedAssets: [...failedAssets],
+        failedAssetReasons: { ...failedAssetReasons }
+      },
       links: [...new Set(links)],
       navLinks: [...new Set(navLinks)]
     };
@@ -12160,18 +12175,9 @@ function parse(html, options) {
 function normalizeAssetLookupUrl(value) {
   return String(value || "").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').trim();
 }
-function isLiveCdnImageUrl(value) {
-  try {
-    const host = new URL(value).hostname.toLowerCase();
-    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".stripe.com") || host.endsWith(".stripeassets.com") || host === "images.stripeassets.com" || host.endsWith(".stripecdn.com") || host.includes("stripe.com") || host.includes("stripeassets.com") || host.includes("stripecdn.com") || host.endsWith(".vercel-storage.com") || host.endsWith(".vercel-insights.com") || /\.(cloudfront|akamaihd|imgix|cloudinary|fastly|b-cdn|cloudflare)\./i.test(host) || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com") || host.endsWith(".cloudfront.net") || host.endsWith(".akamaihd.net") || host.endsWith(".fastly.net") || host.endsWith(".b-cdn.net") || host.includes("images.unsplash.com") || host.includes("cdn.sanity.io") || host.includes("imagekit.io") || host.includes("res.cloudinary.com");
-  } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud|stripe\.com|stripeassets\.com|stripecdn\.com|cloudinary|imgix|cloudfront/i.test(String(value || ""));
-  }
-}
 function isPreferLiveMediaUrl(value) {
   const raw = String(value || "").trim();
   if (!/^https?:\/\//i.test(raw)) return false;
-  if (isLiveCdnImageUrl(raw)) return true;
   try {
     const path = new URL(raw).pathname.toLowerCase();
     return /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp|mp4|webm|mov|m4v|ogg|ogv|mp3|wav|m4a|woff2?|ttf|otf|eot)(\?|$)/i.test(path) || /\/(_next\/image|cdn-cgi\/image|image\/upload|images\/|media\/|assets\/|static\/)/i.test(path);
@@ -12181,13 +12187,7 @@ function isPreferLiveMediaUrl(value) {
 }
 function preferLiveMediaEnabled() {
   const prefer = process.env.CLONYFY_PREFER_LIVE_MEDIA;
-  if (prefer === "0" || prefer === "false") return false;
-  if (prefer === "1" || prefer === "true") return true;
-  const quality = process.env.CLONYFY_QUALITY;
-  if (quality === "0" || quality === "false") return false;
-  if (quality === "1" || quality === "true") return true;
-  if (process.env.VITEST === "true" || process.env.NODE_ENV === "test") return false;
-  return true;
+  return prefer === "1" || prefer === "true";
 }
 function buildAssetMap(assets) {
   const m = /* @__PURE__ */ new Map();
@@ -12225,9 +12225,6 @@ function buildAssetMap(assets) {
 function rewriteUrl(value, assetMap, baseUrl) {
   if (!value) return value;
   const decoded = normalizeAssetLookupUrl(value);
-  if (/^https?:\/\//i.test(decoded) && isLiveCdnImageUrl(decoded)) {
-    return decoded;
-  }
   if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(decoded)) {
     return decoded;
   }
@@ -12237,7 +12234,7 @@ function rewriteUrl(value, assetMap, baseUrl) {
   if (assetMap.has(clean)) return assetMap.get(clean);
   try {
     const abs = new URL(decoded, baseUrl).href;
-    if (isLiveCdnImageUrl(abs) || preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) {
+    if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) {
       return abs;
     }
     const absClean = abs.split("?")[0].split("#")[0];
@@ -12442,7 +12439,7 @@ function walkNode(node, assetMap, origin, baseUrl, stats, failedAssets) {
           const absUrl = new URL(before, baseUrl).href;
           const failed = failedAssets.has(absUrl) || failedAssets.has(before);
           const unresolvedExternalImage = !failed && IMAGE_URL_ATTRS.has(attrName) && (tagName === "img" || tagName === "source" || tagName === "video") && isUnresolvedExternalImage(before, baseUrl, origin, assetMap);
-          if ((failed || unresolvedExternalImage) && !isLiveCdnImageUrl(absUrl) && !isLiveCdnImageUrl(before)) {
+          if (failed || unresolvedExternalImage) {
             attr.value = PLACEHOLDER_IMAGE_WEB_PATH;
             stats.attrsRewritten++;
             continue;
@@ -13027,7 +13024,8 @@ Total unique assets saved: ${uniqueAssets.size}`);
         // so manifest.json stays under Supabase Free storage limits (~50MB).
         assets: r.assets,
         network: IS_SERVERLESS2 || IS_FAST_CLONE2 ? [] : r.network,
-        failedAssets: r.failedAssets
+        failedAssets: r.failedAssets,
+        failedAssetReasons: r.failedAssetReasons
       }))
     };
     const manifestPath = join6(opts.out, "manifest.json");
@@ -13109,4 +13107,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-VPPY7BKB.js.map
+//# sourceMappingURL=chunk-XRWWXCPD.js.map
