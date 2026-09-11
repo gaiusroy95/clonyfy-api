@@ -232,6 +232,17 @@ describe('rewriteHtml — asset URL rewriting', () => {
     expect(out).not.toContain('b.examplecdn.com/icon.woff2');
   });
 
+  it('uses captured /_assets even when URL is also in failedAssets', () => {
+    const html = `<html><head></head><body><img src="https://cdn.example.com/hero.jpg"></body></html>`;
+    const out = rewriteHtml(record({
+      html,
+      assets: [{ originalUrl: 'https://cdn.example.com/hero.jpg', localPath: '/_assets/hero.jpg' }],
+      failedAssets: ['https://cdn.example.com/hero.jpg'],
+    }), ORIGIN);
+    expect(out).toContain('/_assets/hero.jpg');
+    expect(out).not.toContain('__placeholder__');
+  });
+
   it('leaves uncaptured external CDN images absolute (not rewritten to placeholder)', () => {
     const html = `<html><head></head><body><img src="https://cdn.example.com/uncaptured.png"></body></html>`;
     const out = rewriteHtml(record({ html }), ORIGIN);

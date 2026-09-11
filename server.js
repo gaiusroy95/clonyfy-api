@@ -3697,6 +3697,23 @@ async function handleRequest(req, res) {
       if (stored && await serveCloneAssetBytes(dir, stored)) return;
     }
     console.warn(`[assets] miss ${relPath} (no local/Storage bytes)`);
+    // Last-resort: redirect to original CDN URL from manifest so images still show.
+    try {
+      const outDirHint = refOutDir || dirsToTry.find(Boolean);
+      if (outDirHint) {
+        const ctx = await buildPreviewAssetContext(outDirHint);
+        const assetKey = relPath.replace(/^public\//, '');
+        const origUrl = ctx.originalByRelPath?.[assetKey]
+          || ctx.originalByRelPath?.[`public/${assetKey}`]
+          || ctx.originalByRelPath?.[`_assets/${assetKey.replace(/^_assets\//, '')}`];
+        if (origUrl && /^https?:\/\//i.test(origUrl)) {
+          console.warn(`[assets] last-resort redirect ${relPath} -> origin`);
+          res.writeHead(302, { Location: origUrl, 'Cache-Control': 'public, max-age=300' });
+          res.end();
+          return;
+        }
+      }
+    } catch {}
     res.writeHead(404); res.end(); return;
   }
 
@@ -4414,15 +4431,18 @@ async function handleRequest(req, res) {
             if (IS_SERVERLESS || IS_HOSTED) {
               const storedEarly = await verifyCloneReadableFromStorage(job.outDir).catch(() => ({ ok: false }));
               if (storedEarly?.ok) {
-                await persistCloneOutput(job.outDir, { deferAssets: true, requireCritical: false }).catch(() => {});
+                // Upload remaining assets before preview — deferred uploads caused empty images.
+                await persistCloneOutput(job.outDir, { deferAssets: false, requireCritical: false }).catch((err) => {
+                  job.logs.push(`[WARN] Asset persist: ${err?.message || err}`);
+                });
                 cloneReadable = storedEarly;
                 if (storedEarly.pages > 0) job.pages = storedEarly.pages;
                 job.logs.push(`[INFO] Using ${storedEarly.pages} page(s) already persisted to Storage.`);
               }
             }
             if (!cloneReadable?.ok) {
-              // Critical HTML first so preview works; asset upload continues in background on hosted.
-              await persistCloneOutput(job.outDir, { deferAssets: IS_HOSTED, requireCritical: true });
+              // Persist HTML + assets together so /_assets is available when preview opens.
+              await persistCloneOutput(job.outDir, { deferAssets: false, requireCritical: true });
               cloneReadable = await verifyCloneReadableWithRetry(job.outDir);
               if (!cloneReadable.ok) {
                 await persistCloneOutput(job.outDir, { deferAssets: false, requireCritical: true });

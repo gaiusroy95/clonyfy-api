@@ -1782,13 +1782,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
             enqueueCssReferences(subBuf.toString("utf8"), absUrl);
           }
         } catch (err) {
-          const msg = err.message || "";
-          try {
-            const absUrl = new URL(cssUrl, sourceUrl).href;
-            markFailed(absUrl, /timeout|aborted|AbortError/i.test(msg) ? "timeout" : "error");
-          } catch {
-          }
-          logger.debug(`  [CSS REF ERR] ${cssUrl}: ${msg}`);
+          logger.debug(`  [CSS REF ERR] ${cssUrl}: ${err.message}`);
         }
       });
     }
@@ -1838,14 +1832,13 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     } catch {
     }
     const isStylesheetRequest = resourceType === "stylesheet";
-    const isAsset = isStylesheetRequest || ASSET_EXTS.has(_pathExt) || contentType.startsWith("image/") || contentType.startsWith("font/") || contentType.startsWith("text/css") || contentType.includes("javascript");
+    const isAsset = isStylesheetRequest || resourceType === "image" || resourceType === "media" || resourceType === "font" || ASSET_EXTS.has(_pathExt) || contentType.startsWith("image/") || contentType.startsWith("font/") || contentType.startsWith("video/") || contentType.startsWith("audio/") || contentType.startsWith("text/css") || contentType.includes("javascript");
     const isJson = contentType.includes("application/json");
     const isText = contentType.startsWith("text/");
     const isCss = isStylesheetRequest || contentType.includes("text/css") || _pathExt === ".css";
     const loggedContentType = isCss && !contentType.includes("text/css") ? "text/css; charset=utf-8" : contentType;
     if (status >= 400 && isImageLikeRequest(url, resourceType)) {
-      markFailed(url, `http_status:${status}`);
-      logger.debug(`  [IMAGE FALLBACK] ${url} -> HTTP ${status}, substituting placeholder`);
+      logger.debug(`  [IMAGE FALLBACK] ${url} -> HTTP ${status}, substituting placeholder for browser`);
       await route.fulfill({ status: 200, contentType: "image/svg+xml", body: PLACEHOLDER_IMAGE_BODY });
       return;
     }
@@ -1886,7 +1879,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       await route.fulfill({ status: 200, contentType: "application/json; charset=utf-8", body: "{}" });
       return;
     }
-    if (isAsset && status === 200) {
+    if (isAsset && status >= 200 && status < 300) {
       assetsIntercepted++;
       try {
         const maxBytes = isCss ? MAX_CSS_BYTES : maxAssetBytes;
@@ -1902,7 +1895,8 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           await route.fulfill({ response });
           return;
         }
-        const webPath = await saveAsset(url, buf, contentType, isCss);
+        const effectiveType = contentType || (resourceType === "image" ? "image/png" : resourceType === "font" ? "font/woff2" : resourceType === "media" ? "application/octet-stream" : "application/octet-stream");
+        const webPath = await saveAsset(url, buf, effectiveType, isCss);
         if (webPath && isCss && buf.length < CSS_REF_SCAN_MAX_BYTES) {
           enqueueCssReferences(buf.toString("utf8"), url);
         }
@@ -2129,13 +2123,9 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
               markFailed(absUrl, `http_status:${r.status}`);
             } else {
               logger.debug(`  [DOM ASSET SKIP] ${absUrl} -> HTTP ${r.status}`);
-              markFailed(absUrl, `http_status:${r.status}`);
             }
           } catch (err) {
-            const msg = err.message || "";
-            const reason = /timeout|aborted|AbortError/i.test(msg) ? "timeout" : "error";
-            markFailed(u, reason);
-            logger.debug(`  [DOM ASSET ERR] ${u}: ${msg}`);
+            logger.debug(`  [DOM ASSET ERR] ${u}: ${err.message}`);
           }
         });
       }
@@ -2326,12 +2316,11 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
                 }
                 const buf = Buffer.from(await r.arrayBuffer());
                 await saveAsset(absUrl, buf, contentType);
-              } else if (r.status >= 400) {
+              } else if (r.status >= 400 && r.status < 500) {
                 markFailed(absUrl, `http_status:${r.status}`);
               }
             } catch (err) {
-              const msg = err.message || "";
-              markFailed(u, /timeout|aborted|AbortError/i.test(msg) ? "timeout" : "error");
+              logger.debug(`  [DOM ASSET ERR] ${err.message}`);
             }
           });
         }
@@ -12313,6 +12302,28 @@ var IMAGE_URL_ATTRS = /* @__PURE__ */ new Set([
   "srcset",
   "data-srcset"
 ]);
+function assetMapHasUrl(assetMap, value, baseUrl) {
+  const decoded = normalizeAssetLookupUrl(value);
+  if (assetMap.has(value) || assetMap.has(decoded)) return true;
+  const clean = decoded.split("?")[0].split("#")[0];
+  if (assetMap.has(clean)) return true;
+  try {
+    const abs = new URL(decoded, baseUrl).href;
+    const absClean = abs.split("?")[0].split("#")[0];
+    if (assetMap.has(abs) || assetMap.has(absClean)) return true;
+    const pathname = new URL(abs).pathname;
+    if (assetMap.has(pathname)) return true;
+    for (const key of assetMap.keys()) {
+      try {
+        if (new URL(normalizeAssetLookupUrl(key), abs).pathname === pathname) return true;
+      } catch {
+        if (key.endsWith(pathname)) return true;
+      }
+    }
+  } catch {
+  }
+  return false;
+}
 function isUnresolvedExternalImage(_value, _baseUrl, _origin, _assetMap) {
   return false;
 }
@@ -12437,6 +12448,16 @@ function walkNode(node, assetMap, origin, baseUrl, stats, failedAssets) {
         }
         try {
           const absUrl = new URL(before, baseUrl).href;
+          if (assetMapHasUrl(assetMap, before, baseUrl) || assetMapHasUrl(assetMap, absUrl, baseUrl)) {
+            attr.value = rewriteAttrValue(attrName, attr.value, assetMap, baseUrl);
+            if (attr.value !== before) {
+              stats.attrsRewritten++;
+              if ((tagName === "link" || tagName === "script") && attr.value.includes("/_assets/")) {
+                rewroteSubresourceToLocal = true;
+              }
+            }
+            continue;
+          }
           const failed = failedAssets.has(absUrl) || failedAssets.has(before);
           const unresolvedExternalImage = !failed && IMAGE_URL_ATTRS.has(attrName) && (tagName === "img" || tagName === "source" || tagName === "video") && isUnresolvedExternalImage(before, baseUrl, origin, assetMap);
           if (failed || unresolvedExternalImage) {
@@ -13107,4 +13128,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-XRWWXCPD.js.map
+//# sourceMappingURL=chunk-UB6MNXPI.js.map

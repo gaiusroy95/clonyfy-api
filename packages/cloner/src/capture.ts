@@ -707,12 +707,8 @@ export async function capturePage(
             enqueueCssReferences(subBuf.toString('utf8'), absUrl);
           }
         } catch (err) {
-          const msg = (err as Error).message || '';
-          try {
-            const absUrl = new URL(cssUrl, sourceUrl).href;
-            markFailed(absUrl, /timeout|aborted|AbortError/i.test(msg) ? 'timeout' : 'error');
-          } catch { /* ignore */ }
-          logger.debug(`  [CSS REF ERR] ${cssUrl}: ${msg}`);
+          // Transient CSS url() fetch failures — leave absolute URL for browser.
+          logger.debug(`  [CSS REF ERR] ${cssUrl}: ${(err as Error).message}`);
         }
       });
     }
@@ -768,10 +764,17 @@ export async function capturePage(
     let _pathExt = '';
     try { _pathExt = extname(new URL(url.split('?')[0]).pathname).toLowerCase(); } catch { /* ignore */ }
     const isStylesheetRequest = resourceType === 'stylesheet';
+    // Always treat Playwright image/media/font types as assets — many CDNs omit
+    // file extensions or return octet-stream (e.g. /_next/image, signed URLs).
     const isAsset = isStylesheetRequest
+      || resourceType === 'image'
+      || resourceType === 'media'
+      || resourceType === 'font'
       || ASSET_EXTS.has(_pathExt)
       || contentType.startsWith('image/')
       || contentType.startsWith('font/')
+      || contentType.startsWith('video/')
+      || contentType.startsWith('audio/')
       || contentType.startsWith('text/css')
       || contentType.includes('javascript');
     const isJson = contentType.includes('application/json');
@@ -783,8 +786,9 @@ export async function capturePage(
       : contentType;
 
     if (status >= 400 && isImageLikeRequest(url, resourceType)) {
-      markFailed(url, `http_status:${status}`);
-      logger.debug(`  [IMAGE FALLBACK] ${url} -> HTTP ${status}, substituting placeholder`);
+      // Real HTTP errors only — keep absolute URL in HTML (do not markFailed) so
+      // preview can still hotlink if the CDN serves the browser but blocked our fetch.
+      logger.debug(`  [IMAGE FALLBACK] ${url} -> HTTP ${status}, substituting placeholder for browser`);
       await route.fulfill({ status: 200, contentType: 'image/svg+xml', body: PLACEHOLDER_IMAGE_BODY });
       return;
     }
@@ -834,7 +838,8 @@ export async function capturePage(
       return;
     }
 
-    if (isAsset && status === 200) {
+    // Persist successful asset bodies (include 206 partial — some CDNs use it).
+    if (isAsset && status >= 200 && status < 300) {
       assetsIntercepted++;
       try {
         const maxBytes = isCss ? MAX_CSS_BYTES : maxAssetBytes;
@@ -850,7 +855,12 @@ export async function capturePage(
           await route.fulfill({ response });
           return;
         }
-        const webPath = await saveAsset(url, buf, contentType, isCss);
+        const effectiveType = contentType
+          || (resourceType === 'image' ? 'image/png'
+            : resourceType === 'font' ? 'font/woff2'
+            : resourceType === 'media' ? 'application/octet-stream'
+            : 'application/octet-stream');
+        const webPath = await saveAsset(url, buf, effectiveType, isCss);
 
         if (webPath && isCss && buf.length < CSS_REF_SCAN_MAX_BYTES) {
           enqueueCssReferences(buf.toString('utf8'), url);
@@ -1097,13 +1107,11 @@ export async function capturePage(
             markFailed(absUrl, `http_status:${r.status}`);
           } else {
             logger.debug(`  [DOM ASSET SKIP] ${absUrl} -> HTTP ${r.status}`);
-            markFailed(absUrl, `http_status:${r.status}`);
+            // Transient 5xx — do not markFailed; leave absolute URL in HTML.
           }
         } catch (err) {
-          const msg = (err as Error).message || '';
-          const reason = /timeout|aborted|AbortError/i.test(msg) ? 'timeout' : 'error';
-          markFailed(u, reason);
-          logger.debug(`  [DOM ASSET ERR] ${u}: ${msg}`);
+          // Timeouts/network blips: do NOT markFailed (would blank every image).
+          logger.debug(`  [DOM ASSET ERR] ${u}: ${(err as Error).message}`);
         }
       });
     }
@@ -1307,12 +1315,12 @@ export async function capturePage(
               }
               const buf = Buffer.from(await r.arrayBuffer());
               await saveAsset(absUrl, buf, contentType);
-            } else if (r.status >= 400) {
+            } else if (r.status >= 400 && r.status < 500) {
               markFailed(absUrl, `http_status:${r.status}`);
             }
           } catch (err) {
-            const msg = (err as Error).message || '';
-            markFailed(u, /timeout|aborted|AbortError/i.test(msg) ? 'timeout' : 'error');
+            // Best-effort — do not markFailed on timeout (keeps absolute URL usable).
+            logger.debug(`  [DOM ASSET ERR] ${(err as Error).message}`);
           }
         });
       }

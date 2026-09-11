@@ -353,9 +353,19 @@ function walkNode(
           continue;
         }
 
-        // Replace failed assets with the local placeholder (site-agnostic).
+        // Prefer a successfully captured local file over failedAssets placeholders.
         try {
           const absUrl = new URL(before, baseUrl).href;
+          if (assetMapHasUrl(assetMap, before, baseUrl) || assetMapHasUrl(assetMap, absUrl, baseUrl)) {
+            attr.value = rewriteAttrValue(attrName, attr.value, assetMap, baseUrl);
+            if (attr.value !== before) {
+              stats.attrsRewritten++;
+              if ((tagName === 'link' || tagName === 'script') && attr.value.includes('/_assets/')) {
+                rewroteSubresourceToLocal = true;
+              }
+            }
+            continue;
+          }
           const failed = failedAssets.has(absUrl) || failedAssets.has(before);
           const unresolvedExternalImage = !failed
             && IMAGE_URL_ATTRS.has(attrName)
