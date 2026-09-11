@@ -159,6 +159,23 @@ export async function runClone(options: ClonerOptions, events: CloneRunEvents = 
     const completeAssets = [...completeAssetMap.values()];
     for (const record of uniqueRecords) {
       record.html = rewriteHtml({ ...record, assets: completeAssets }, targetOrigin);
+      // Re-write final HTML so serverless offload / persist get the complete asset rewrite.
+      try {
+        const filename = pageFilename(record.route);
+        const pagePath = join(capturedPagesDir, filename);
+        writeFileSync(pagePath, record.html, 'utf8');
+        routeMap[record.route] = filename;
+        await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: 'page' });
+      } catch (writeErr) {
+        logger.warn(`  [WRITE ERR] final ${record.url}: ${(writeErr as Error).message}`);
+      }
+    }
+    try {
+      const routeMapPath = join(opts.out, 'route-map.json');
+      writeFileSync(routeMapPath, JSON.stringify(routeMap, null, 2), 'utf8');
+      await notifyArtifact({ relPath: 'route-map.json', absPath: routeMapPath, kind: 'route-map' });
+    } catch (writeErr) {
+      logger.warn(`  [WRITE ERR] route-map.json: ${(writeErr as Error).message}`);
     }
 
     const allNetwork = uniqueRecords.flatMap((r) => r.network);

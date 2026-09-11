@@ -1451,8 +1451,71 @@ async function persistCloneOutput(outDir, options = {}) {
     });
 
   if (!assetsOnly) {
-    if (!criticalFiles.some((f) => f.rel.startsWith('captured-pages/') && f.rel.endsWith('.html'))) {
-      if (requireCritical) throw new Error('No captured HTML pages found on disk to persist');
+    const hasLocalHtml = criticalFiles.some((f) => f.rel.startsWith('captured-pages/') && f.rel.endsWith('.html'));
+    if (!hasLocalHtml) {
+      // Serverless mid-clone offload uploads pages then deletes them from /tmp.
+      // Treat Storage as source of truth so final persist does not false-fail.
+      if (requireCritical) {
+        const stored = await verifyCloneReadableFromStorage(outDir).catch(() => ({ ok: false }));
+        if (stored?.ok) {
+          const leftovers = criticalFiles.filter((f) => !f.rel.startsWith('captured-pages/'));
+          if (leftovers.length) await runLimited(leftovers, IS_HOSTED ? 4 : 8);
+          try {
+            const list = [];
+            for (const storagePath of cloneStoragePathCandidates(outDir, 'route-map.json')) {
+              const raw = await getCloneTextFile(storagePath).catch(() => null)
+                || (await downloadCloneFile(storagePath))?.toString('utf8');
+              if (!raw) continue;
+              const map = JSON.parse(raw);
+              for (const filename of Object.values(map || {})) {
+                if (!filename) continue;
+                list.push({
+                  rel: `captured-pages/${String(filename).replace(/\\/g, '/')}`,
+                  size: 0,
+                  contentType: 'text/html; charset=utf-8',
+                });
+              }
+              list.push({ rel: 'route-map.json', size: Buffer.byteLength(raw), contentType: 'application/json' });
+              break;
+            }
+            for (const f of leftovers) {
+              list.push({
+                rel: f.rel,
+                size: statSync(f.abs).size,
+                contentType: contentTypeForPath(f.rel),
+              });
+            }
+            if (list.length) {
+              await saveCloneTextFile(cloneFileListStoragePath(outDir), JSON.stringify(list)).catch(() => {});
+            }
+          } catch {}
+          // Upload any remaining local assets (pages already live in Storage).
+          if (assetFiles.length) {
+            if (deferAssets) {
+              void runLimited(assetFiles, IS_HOSTED ? 4 : 8).catch((err) => {
+                console.warn(`[clone storage] background assets failed: ${err?.message || err}`);
+              });
+              return {
+                uploaded: Math.max(stored.pages || 0, leftovers.length),
+                total: files.length + (stored.pages || 0),
+                deferred: assetFiles.length,
+                critical: stored.pages || 0,
+                fromStorage: true,
+              };
+            }
+            await runLimited(assetFiles, IS_HOSTED ? 4 : 8);
+          }
+          console.log(`[clone storage] using Storage-backed pages (${stored.pages || 0}) for ${outDir}; local leftovers=${leftovers.length}`);
+          return {
+            uploaded: Math.max(stored.pages || 0, leftovers.length),
+            total: files.length + (stored.pages || 0),
+            deferred: 0,
+            critical: stored.pages || 0,
+            fromStorage: true,
+          };
+        }
+        throw new Error('No captured HTML pages found on disk to persist');
+      }
       return { uploaded: 0, total: files.length, deferred: 0, critical: 0 };
     }
     await runLimited(criticalFiles, IS_HOSTED ? 4 : 8);
@@ -4338,12 +4401,25 @@ async function handleRequest(req, res) {
         if (exitCode === 0) {
           try {
             if (job.offloadQueue) await job.offloadQueue.flush();
-            // Critical HTML first so preview works; asset upload continues in background on hosted.
-            await persistCloneOutput(job.outDir, { deferAssets: IS_HOSTED, requireCritical: true });
-            cloneReadable = await verifyCloneReadableWithRetry(job.outDir);
-            if (!cloneReadable.ok) {
-              await persistCloneOutput(job.outDir, { deferAssets: false, requireCritical: true });
-              cloneReadable = await verifyCloneReadableWithRetry(job.outDir, 3);
+            // Serverless offload may already have pages in Storage (and deleted local HTML).
+            // Prefer Storage verify first so we don't false-fail on empty /tmp.
+            if (IS_SERVERLESS || IS_HOSTED) {
+              const storedEarly = await verifyCloneReadableFromStorage(job.outDir).catch(() => ({ ok: false }));
+              if (storedEarly?.ok) {
+                await persistCloneOutput(job.outDir, { deferAssets: true, requireCritical: false }).catch(() => {});
+                cloneReadable = storedEarly;
+                if (storedEarly.pages > 0) job.pages = storedEarly.pages;
+                job.logs.push(`[INFO] Using ${storedEarly.pages} page(s) already persisted to Storage.`);
+              }
+            }
+            if (!cloneReadable?.ok) {
+              // Critical HTML first so preview works; asset upload continues in background on hosted.
+              await persistCloneOutput(job.outDir, { deferAssets: IS_HOSTED, requireCritical: true });
+              cloneReadable = await verifyCloneReadableWithRetry(job.outDir);
+              if (!cloneReadable.ok) {
+                await persistCloneOutput(job.outDir, { deferAssets: false, requireCritical: true });
+                cloneReadable = await verifyCloneReadableWithRetry(job.outDir, 3);
+              }
             }
             // On Render/hosted, require Storage — local disk is ephemeral and will vanish on restart.
             if (IS_HOSTED && cloneReadable?.ok) {
@@ -4384,8 +4460,16 @@ async function handleRequest(req, res) {
               try { rmSync(job.outDir, { recursive: true, force: true }); } catch {}
             }
           } catch (storageErr) {
-            job.logs.push(`[ERROR] Could not persist clone files: ${storageErr?.message || storageErr}`);
-            cloneReadable = { ok: false, error: storageErr?.message || String(storageErr) };
+            // Mid-clone offload may have already saved pages; don't fail if Storage can serve them.
+            const stored = await verifyCloneReadableFromStorage(job.outDir).catch(() => null);
+            if (stored?.ok) {
+              cloneReadable = stored;
+              if (stored.pages > 0) job.pages = stored.pages;
+              job.logs.push(`[WARN] Disk persist skipped (${storageErr?.message || storageErr}); using ${stored.pages} page(s) already in Storage.`);
+            } else {
+              job.logs.push(`[ERROR] Could not persist clone files: ${storageErr?.message || storageErr}`);
+              cloneReadable = { ok: false, error: storageErr?.message || String(storageErr) };
+            }
           }
         }
         let cloneRecordSaved = false;

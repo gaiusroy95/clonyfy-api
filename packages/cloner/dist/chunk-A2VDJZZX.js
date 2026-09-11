@@ -12838,6 +12838,22 @@ Captured ${records.length} page(s).`);
     const completeAssets = [...completeAssetMap.values()];
     for (const record of uniqueRecords) {
       record.html = rewriteHtml({ ...record, assets: completeAssets }, targetOrigin);
+      try {
+        const filename = pageFilename(record.route);
+        const pagePath = join6(capturedPagesDir, filename);
+        writeFileSync5(pagePath, record.html, "utf8");
+        routeMap[record.route] = filename;
+        await notifyArtifact({ relPath: `captured-pages/${filename}`, absPath: pagePath, kind: "page" });
+      } catch (writeErr) {
+        logger.warn(`  [WRITE ERR] final ${record.url}: ${writeErr.message}`);
+      }
+    }
+    try {
+      const routeMapPath = join6(opts.out, "route-map.json");
+      writeFileSync5(routeMapPath, JSON.stringify(routeMap, null, 2), "utf8");
+      await notifyArtifact({ relPath: "route-map.json", absPath: routeMapPath, kind: "route-map" });
+    } catch (writeErr) {
+      logger.warn(`  [WRITE ERR] route-map.json: ${writeErr.message}`);
     }
     const allNetwork = uniqueRecords.flatMap((r) => r.network);
     logger.info(`
@@ -12967,4 +12983,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-A3HDQQ42.js.map
+//# sourceMappingURL=chunk-A2VDJZZX.js.map
