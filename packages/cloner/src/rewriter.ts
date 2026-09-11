@@ -11,7 +11,7 @@ function normalizeAssetLookupUrl(value: string): string {
     .trim();
 }
 
-/** Shopify / hotlink CDNs — keep absolute URLs if not captured; never blank with placeholders. */
+/** Shopify / Stripe / common CDNs — keep absolute URLs for visual fidelity. */
 export function isLiveCdnImageUrl(value: string): boolean {
   try {
     const host = new URL(value).hostname.toLowerCase();
@@ -21,13 +21,52 @@ export function isLiveCdnImageUrl(value: string): boolean {
       || host.includes('shopifycdn')
       || host.endsWith('.shopifycloud.com')
       || host.endsWith('.myshopify.com')
-      || /\.(cloudfront|akamaihd|imgix|cloudinary|fastly)\./i.test(host)
+      || host.endsWith('.stripe.com')
+      || host.includes('stripe.com')
+      || host.endsWith('.vercel-storage.com')
+      || host.endsWith('.vercel-insights.com')
+      || /\.(cloudfront|akamaihd|imgix|cloudinary|fastly|b-cdn|cloudflare)\./i.test(host)
       || host.endsWith('.imgix.net')
       || host.endsWith('.cloudinary.com')
+      || host.endsWith('.cloudfront.net')
+      || host.endsWith('.akamaihd.net')
+      || host.endsWith('.fastly.net')
+      || host.endsWith('.b-cdn.net')
+      || host.includes('images.unsplash.com')
+      || host.includes('cdn.sanity.io')
+      || host.includes('imagekit.io')
+      || host.includes('res.cloudinary.com')
     );
   } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud/i.test(String(value || ''));
+    return /cdn\.shopify\.com|shopifycdn|shopifycloud|stripe\.com|cloudinary|imgix|cloudfront/i.test(String(value || ''));
   }
+}
+
+/** Absolute http(s) image/video/font URL — keep live for near-identical preview. */
+export function isPreferLiveMediaUrl(value: string): boolean {
+  const raw = String(value || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return false;
+  if (isLiveCdnImageUrl(raw)) return true;
+  try {
+    const path = new URL(raw).pathname.toLowerCase();
+    return /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp|mp4|webm|mov|m4v|ogg|ogv|mp3|wav|m4a|woff2?|ttf|otf|eot)(\?|$)/i.test(path)
+      || /\/(_next\/image|cdn-cgi\/image|image\/upload|images\/|media\/|assets\/|static\/)/i.test(path);
+  } catch {
+    return false;
+  }
+}
+
+function preferLiveMediaEnabled(): boolean {
+  const prefer = process.env.CLONYFY_PREFER_LIVE_MEDIA;
+  if (prefer === '0' || prefer === 'false') return false;
+  if (prefer === '1' || prefer === 'true') return true;
+  const quality = process.env.CLONYFY_QUALITY;
+  if (quality === '0' || quality === 'false') return false;
+  if (quality === '1' || quality === 'true') return true;
+  // Default ON in production/runtime. Unit tests (Vitest) keep classic local rewrite
+  // unless they opt in with CLONYFY_PREFER_LIVE_MEDIA=1.
+  if (process.env.VITEST === 'true' || process.env.NODE_ENV === 'test') return false;
+  return true;
 }
 
 function buildAssetMap(assets: AssetEntry[]): Map<string, string> {
@@ -69,6 +108,13 @@ function buildAssetMap(assets: AssetEntry[]): Map<string, string> {
 function rewriteUrl(value: string, assetMap: Map<string, string>, baseUrl: string): string {
   if (!value) return value;
   const decoded = normalizeAssetLookupUrl(value);
+
+  // Near-100% visual fidelity: keep live absolute media URLs instead of swapping
+  // to /_assets/ that may be missing after serverless /tmp offload.
+  if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(decoded)) {
+    return decoded;
+  }
+
   const clean = decoded.split('?')[0].split('#')[0];
 
   // Direct lookup (absolute URL already in map)
@@ -79,6 +125,9 @@ function rewriteUrl(value: string, assetMap: Map<string, string>, baseUrl: strin
   // Resolve root-relative and document-relative paths against origin, then look up
   try {
     const abs = new URL(decoded, baseUrl).href;
+    if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) {
+      return abs;
+    }
     const absClean = abs.split('?')[0].split('#')[0];
     if (assetMap.has(abs)) return assetMap.get(abs)!;
     if (assetMap.has(absClean)) return assetMap.get(absClean)!;
@@ -94,7 +143,11 @@ function rewriteUrl(value: string, assetMap: Map<string, string>, baseUrl: strin
     }
     // Same-origin but not captured as asset — convert to relative path so links still work
     const u = new URL(abs);
-    if (u.origin === new URL(baseUrl).origin) return u.pathname + u.search + u.hash;
+    if (u.origin === new URL(baseUrl).origin) {
+      // Quality: prefer absolute same-origin media so preview matches live site.
+      if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) return abs;
+      return u.pathname + u.search + u.hash;
+    }
   } catch { /* not a URL */ }
 
   return value;
@@ -254,6 +307,7 @@ function rewriteInlineAssetReferences(text: string, assetMap: Map<string, string
     .sort((a, b) => b[0].length - a[0].length);
 
   for (const [from, to] of entries) {
+    if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(from)) continue;
     output = replaceAllLiteral(output, from, to);
 
     const escapedFrom = toEscapedSlash(from);

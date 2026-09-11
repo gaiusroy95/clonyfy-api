@@ -55,11 +55,16 @@ describe('isServerlessRuntime', () => {
 });
 
 describe('isFastCloneProfile', () => {
-  it('treats Render and hosted markers as fast', () => {
-    expect(isFastCloneProfile({ RENDER: 'true' }, '/repo')).toBe(true);
-    expect(isFastCloneProfile({ RENDER_EXTERNAL_URL: 'https://x.onrender.com' }, '/repo')).toBe(true);
-    expect(isFastCloneProfile({ CLONYFY_HOSTED: '1' }, '/repo')).toBe(true);
+  it('quality mode (default) disables auto-fast on hosted markers', () => {
+    expect(isFastCloneProfile({ RENDER: 'true' }, '/repo')).toBe(false);
+    expect(isFastCloneProfile({ RENDER_EXTERNAL_URL: 'https://x.onrender.com' }, '/repo')).toBe(false);
+    expect(isFastCloneProfile({ CLONYFY_HOSTED: '1' }, '/repo')).toBe(false);
+  });
+
+  it('allows explicit fast mode and quality-off hosted fast', () => {
     expect(isFastCloneProfile({ CLONYFY_FAST_CLONE: '1' }, '/repo')).toBe(true);
+    expect(isFastCloneProfile({ RENDER: 'true', CLONYFY_QUALITY: '0' }, '/repo')).toBe(true);
+    expect(isFastCloneProfile({ CLONYFY_HOSTED: '1', CLONYFY_QUALITY: '0' }, '/repo')).toBe(true);
   });
 
   it('allows opting out of fast mode', () => {

@@ -310,6 +310,9 @@ function isLiveCdnMediaUrl(url: string): boolean {
       || host.endsWith('.cloudfront.net')
       || host.endsWith('.akamaihd.net')
       || host.endsWith('.fastly.net')
+      || host.includes('cdn.sanity.io')
+      || host.includes('imagekit.io')
+      || host.includes('images.unsplash.com')
     );
   } catch {
     return /cdn\.shopify\.com|shopifycdn|shopifycloud|images\.stripe|cloudinary|imgix/i.test(url);

@@ -33,7 +33,7 @@ const NON_PAGE_EXTS = new Set([
   '.webp','.woff','.woff2','.xls','.xlsx','.xml','.zip',
 ]);
 const NAV_DELAY_MS = IS_FAST_CLONE ? 50 : 250;
-const PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 60_000 : 180_000;
+const PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 60_000 : 150_000;
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 260 : 400;
 const STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 10_000 : 10_000;
@@ -112,7 +112,9 @@ function hashUrl(url: string): string {
 }
 
 export const SITEMAP_SEED_CAP = IS_SERVERLESS ? 20 : 80;
-export const START_URL_CAPTURE_TIMEOUT = IS_SERVERLESS ? 90_000 : 300_000;
+export const START_URL_CAPTURE_TIMEOUT = IS_SERVERLESS
+  ? (IS_FAST_CLONE ? 90_000 : 150_000)
+  : 300_000;
 
 const LOW_PRIORITY_PATH_RE = /^\/(legal|privacy|terms|cookie|gdpr|compliance|policy|policies|disclaimer|imprint|sitemap)(\/|$)/i;
 

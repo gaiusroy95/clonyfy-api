@@ -19,11 +19,13 @@ Deploy the **Backend folder/repo as its own Vercel project** (separate from the 
 
 | Variable | Notes |
 |---|---|
+| `CLONYFY_QUALITY=1` | **Default.** Near-identical capture (desktop budgets, live media URLs). Set `0` only for emergency low-RAM |
+| `CLONYFY_PREFER_LIVE_MEDIA=1` | Keep absolute CDN/image URLs in HTML (default with quality) |
 | `CLONYFY_SERVERLESS=1` | Explicit serverless mode (also auto-detected via `VERCEL`) |
 | `CLONYFY_HOSTED=1` | Hosted preview paths |
-| `CLONYFY_FAST_CLONE=1` | Faster capture budgets |
 | `CLONYFY_LOW_MEMORY=1` | Soft concurrency / exports (auto-on for Vercel unless `=0`) |
-| `CLONYFY_SERVERLESS_MAX_PAGES=5` | Page budget per clone |
+| `CLONYFY_SERVERLESS_MAX_PAGES=5` | Page budget per clone (use 1–3 for max quality) |
+| `CLONYFY_FAST_CLONE=1` | **Avoid** — emergency only; hurts images/animations |
 | `APP_URL` | Public API URL (e.g. `https://api.clonyfy.com`) |
 | `FRONTEND_URL` | Live Frontend origin (CORS + redirects) |
 | Supabase / Stripe / auth | Same as local — `SUPABASE_*`, `ADMIN_PASSWORD`, peppers, etc. |

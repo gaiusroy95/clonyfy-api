@@ -221,7 +221,7 @@ const CLONE_CONCURRENCY = Math.max(1, Math.min(4, parseInt(
 ) || (IS_HOSTED && !IS_LOW_MEMORY && !IS_SERVERLESS ? 2 : 1)));
 /** Wall-clock limit so jobs cannot spin forever. Vercel maxDuration is ~300s — default ~240s there. */
 const CLONE_DEADLINE_DEFAULT_MS = IS_VERCEL
-  ? 240_000
+  ? 280_000
   : ((IS_LOW_MEMORY ? 12 : 18) * 60 * 1000);
 const CLONE_DEADLINE_MS = Math.max(
   60_000,
@@ -2202,10 +2202,12 @@ function previewVisibilityFix(baseHref = '/') {
 }
 
 async function rewritePreviewAssetUrls(html, outDir, options = {}) {
+  const qualityOn = process.env.CLONYFY_QUALITY !== '0' && process.env.CLONYFY_QUALITY !== 'false';
   const {
     baseHref = '/',
     injectPreviewNav = true,
-    injectScrollReveal = true,
+    // Quality clones already freeze post-scroll visibility; fake scroll-reveal fights real motion.
+    injectScrollReveal = !qualityOn && process.env.CLONYFY_SCROLL_REVEAL !== '0',
     assetContext = null,
   } = options;
   let out = rewriteBareAssetUrls(html, outDir);
@@ -2226,6 +2228,23 @@ async function rewritePreviewAssetUrls(html, outDir, options = {}) {
   // Resolve the clone's original origin once (used for media rewrite + replay/nav patches).
   const context = assetContext || await buildPreviewAssetContext(outDir);
   const targetOrigin = context.targetOrigin;
+  const originalByRelPath = context.originalByRelPath || {};
+
+  // Restore any /_assets/… that still point at local files back to the live original URL.
+  // This is the main path to near-identical images when serverless offload dropped binaries.
+  if (Object.keys(originalByRelPath).length) {
+    out = out.replace(
+      /([("'=\s,])(\/_assets\/[A-Za-z0-9._~%-]+)(\?[^"'\\\s]*)?/g,
+      (match, pre, assetPath, query = '') => {
+        const key = assetPath.replace(/^\//, '');
+        const original = originalByRelPath[key]
+          || originalByRelPath[`public${assetPath}`]
+          || originalByRelPath[assetPath.replace(/^\/_assets\//, '_assets/')];
+        if (!original || !/^https?:\/\//i.test(original)) return match;
+        return `${pre}${original}`;
+      },
+    );
+  }
 
   // Point un-captured root-relative media/asset paths back to the original origin.
   // This works in BOTH the preview iframe (`/api/page` src) and the editor iframe
@@ -4607,7 +4626,10 @@ async function handleRequest(req, res) {
       } else {
         const childEnv = {
           ...process.env,
-          ...(IS_HOSTED && !process.env.CLONYFY_FAST_CLONE ? { CLONYFY_FAST_CLONE: '1' } : {}),
+          // Quality-first: never force lossy fast clone on hosted. Opt in with CLONYFY_FAST_CLONE=1.
+          ...(IS_HOSTED && process.env.CLONYFY_FAST_CLONE == null && process.env.CLONYFY_QUALITY === '0'
+            ? { CLONYFY_FAST_CLONE: '1' }
+            : {}),
         };
         const proc = spawn(process.execPath, [CLI, ...args], {
           cwd: __dirname,

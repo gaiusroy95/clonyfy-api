@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { rewriteHtml } from '../rewriter.js';
 import type { PageRecord } from '../types.js';
 
@@ -58,6 +58,16 @@ describe('rewriteHtml — CSP meta tag removal', () => {
 });
 
 describe('rewriteHtml — asset URL rewriting', () => {
+  const prevPrefer = process.env.CLONYFY_PREFER_LIVE_MEDIA;
+  beforeEach(() => {
+    // Local-rewrite assertions need offline mode; quality default keeps live URLs.
+    process.env.CLONYFY_PREFER_LIVE_MEDIA = '0';
+  });
+  afterEach(() => {
+    if (prevPrefer === undefined) delete process.env.CLONYFY_PREFER_LIVE_MEDIA;
+    else process.env.CLONYFY_PREFER_LIVE_MEDIA = prevPrefer;
+  });
+
   it('rewrites <img src> to /_assets/ path', () => {
     const html = `<html><head></head><body><img src="https://example.com/photo.jpg"></body></html>`;
     const out = rewriteHtml(record({
@@ -66,6 +76,17 @@ describe('rewriteHtml — asset URL rewriting', () => {
     }), ORIGIN);
     expect(out).toContain('/_assets/abc123.jpg');
     expect(out).not.toContain('https://example.com/photo.jpg');
+  });
+
+  it('quality mode keeps live absolute image URLs for fidelity', () => {
+    process.env.CLONYFY_PREFER_LIVE_MEDIA = '1';
+    const html = `<html><head></head><body><img src="https://example.com/photo.jpg"></body></html>`;
+    const out = rewriteHtml(record({
+      html,
+      assets: [{ originalUrl: 'https://example.com/photo.jpg', localPath: '/_assets/abc123.jpg' }],
+    }), ORIGIN);
+    expect(out).toContain('https://example.com/photo.jpg');
+    expect(out).not.toContain('/_assets/abc123.jpg');
   });
 
   it('rewrites <link href> stylesheet to /_assets/ path', () => {

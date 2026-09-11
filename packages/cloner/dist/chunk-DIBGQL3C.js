@@ -874,18 +874,24 @@ function normalizePageUrl(input, baseUrl) {
 function isServerlessRuntime(env = process.env, cwd = process.cwd()) {
   return env.VERCEL === "1" || env.VERCEL === "true" || env.CLONYFY_SERVERLESS === "1" || env.CLONYFY_SERVERLESS === "true" || !!env.VERCEL_ENV || !!env.AWS_LAMBDA_FUNCTION_NAME || !!env.LAMBDA_TASK_ROOT || cwd.startsWith("/var/task");
 }
+function isQualityCloneProfile(env = process.env) {
+  if (env.CLONYFY_QUALITY === "0" || env.CLONYFY_QUALITY === "false") return false;
+  return true;
+}
 function isFastCloneProfile(env = process.env, cwd = process.cwd()) {
   if (env.CLONYFY_FAST_CLONE === "0" || env.CLONYFY_FAST_CLONE === "false") return false;
   if (env.CLONYFY_FAST_CLONE === "1" || env.CLONYFY_FAST_CLONE === "true") return true;
+  if (isQualityCloneProfile(env)) return false;
   if (isServerlessRuntime(env, cwd)) return true;
   if (env.RENDER || env.RENDER_EXTERNAL_URL) return true;
   if (env.CLONYFY_HOSTED === "1" || env.CLONYFY_HOSTED === "true") return true;
   return false;
 }
 var IS_SERVERLESS = isServerlessRuntime();
+var IS_QUALITY = isQualityCloneProfile();
 var IS_FAST_CLONE = isFastCloneProfile();
-var SERVERLESS_ASSET_BUDGET_BYTES = (IS_SERVERLESS ? 140 : Infinity) * 1024 * 1024;
-var PRIORITY_RESERVE_BYTES = IS_SERVERLESS ? 22 * 1024 * 1024 : 0;
+var SERVERLESS_ASSET_BUDGET_BYTES = (IS_SERVERLESS ? IS_QUALITY ? 220 : 140 : Infinity) * 1024 * 1024;
+var PRIORITY_RESERVE_BYTES = IS_SERVERLESS ? (IS_QUALITY ? 40 : 22) * 1024 * 1024 : 0;
 var assetBytesWritten = 0;
 function resetServerlessAssetBudget() {
   assetBytesWritten = 0;
@@ -1445,7 +1451,7 @@ function preferLargestSrcsetCandidate(url) {
 function isLiveCdnMediaUrl(url) {
   try {
     const host = new URL(url).hostname.toLowerCase();
-    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com") || host.endsWith(".stripe.com") || host.includes("stripe.com") || host.endsWith(".b-cdn.net") || host.endsWith(".cloudfront.net") || host.endsWith(".akamaihd.net") || host.endsWith(".fastly.net");
+    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com") || host.endsWith(".stripe.com") || host.includes("stripe.com") || host.endsWith(".b-cdn.net") || host.endsWith(".cloudfront.net") || host.endsWith(".akamaihd.net") || host.endsWith(".fastly.net") || host.includes("cdn.sanity.io") || host.includes("imagekit.io") || host.includes("images.unsplash.com");
   } catch {
     return /cdn\.shopify\.com|shopifycdn|shopifycloud|images\.stripe|cloudinary|imgix/i.test(url);
   }
@@ -3476,7 +3482,7 @@ var NON_PAGE_EXTS2 = /* @__PURE__ */ new Set([
   ".zip"
 ]);
 var NAV_DELAY_MS = IS_FAST_CLONE ? 50 : 250;
-var PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 6e4 : 18e4;
+var PAGE_CAPTURE_TIMEOUT = IS_FAST_CLONE ? 6e4 : 15e4;
 var USER_AGENT3 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 var STATIC_ASSET_LIMIT = IS_FAST_CLONE ? 260 : 400;
 var STATIC_ASSET_TIMEOUT = IS_FAST_CLONE ? 1e4 : 1e4;
@@ -3534,7 +3540,7 @@ function hashUrl2(url) {
   return createHash2("sha1").update(url).digest("hex").slice(0, 16);
 }
 var SITEMAP_SEED_CAP = IS_SERVERLESS ? 20 : 80;
-var START_URL_CAPTURE_TIMEOUT = IS_SERVERLESS ? 9e4 : 3e5;
+var START_URL_CAPTURE_TIMEOUT = IS_SERVERLESS ? IS_FAST_CLONE ? 9e4 : 15e4 : 3e5;
 var LOW_PRIORITY_PATH_RE = /^\/(legal|privacy|terms|cookie|gdpr|compliance|policy|policies|disclaimer|imprint|sitemap)(\/|$)/i;
 function isProbablyHtmlDocument(text, contentType) {
   if (contentType && /text\/html|application\/xhtml\+xml/i.test(contentType)) return true;
@@ -12111,10 +12117,31 @@ function normalizeAssetLookupUrl(value) {
 function isLiveCdnImageUrl(value) {
   try {
     const host = new URL(value).hostname.toLowerCase();
-    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || /\.(cloudfront|akamaihd|imgix|cloudinary|fastly)\./i.test(host) || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com");
+    return host === "cdn.shopify.com" || host.endsWith(".shopify.com") || host.includes("shopifycdn") || host.endsWith(".shopifycloud.com") || host.endsWith(".myshopify.com") || host.endsWith(".stripe.com") || host.includes("stripe.com") || host.endsWith(".vercel-storage.com") || host.endsWith(".vercel-insights.com") || /\.(cloudfront|akamaihd|imgix|cloudinary|fastly|b-cdn|cloudflare)\./i.test(host) || host.endsWith(".imgix.net") || host.endsWith(".cloudinary.com") || host.endsWith(".cloudfront.net") || host.endsWith(".akamaihd.net") || host.endsWith(".fastly.net") || host.endsWith(".b-cdn.net") || host.includes("images.unsplash.com") || host.includes("cdn.sanity.io") || host.includes("imagekit.io") || host.includes("res.cloudinary.com");
   } catch {
-    return /cdn\.shopify\.com|shopifycdn|shopifycloud/i.test(String(value || ""));
+    return /cdn\.shopify\.com|shopifycdn|shopifycloud|stripe\.com|cloudinary|imgix|cloudfront/i.test(String(value || ""));
   }
+}
+function isPreferLiveMediaUrl(value) {
+  const raw = String(value || "").trim();
+  if (!/^https?:\/\//i.test(raw)) return false;
+  if (isLiveCdnImageUrl(raw)) return true;
+  try {
+    const path = new URL(raw).pathname.toLowerCase();
+    return /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp|mp4|webm|mov|m4v|ogg|ogv|mp3|wav|m4a|woff2?|ttf|otf|eot)(\?|$)/i.test(path) || /\/(_next\/image|cdn-cgi\/image|image\/upload|images\/|media\/|assets\/|static\/)/i.test(path);
+  } catch {
+    return false;
+  }
+}
+function preferLiveMediaEnabled() {
+  const prefer = process.env.CLONYFY_PREFER_LIVE_MEDIA;
+  if (prefer === "0" || prefer === "false") return false;
+  if (prefer === "1" || prefer === "true") return true;
+  const quality = process.env.CLONYFY_QUALITY;
+  if (quality === "0" || quality === "false") return false;
+  if (quality === "1" || quality === "true") return true;
+  if (process.env.VITEST === "true" || process.env.NODE_ENV === "test") return false;
+  return true;
 }
 function buildAssetMap(assets) {
   const m = /* @__PURE__ */ new Map();
@@ -12152,12 +12179,18 @@ function buildAssetMap(assets) {
 function rewriteUrl(value, assetMap, baseUrl) {
   if (!value) return value;
   const decoded = normalizeAssetLookupUrl(value);
+  if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(decoded)) {
+    return decoded;
+  }
   const clean = decoded.split("?")[0].split("#")[0];
   if (assetMap.has(value)) return assetMap.get(value);
   if (assetMap.has(decoded)) return assetMap.get(decoded);
   if (assetMap.has(clean)) return assetMap.get(clean);
   try {
     const abs = new URL(decoded, baseUrl).href;
+    if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) {
+      return abs;
+    }
     const absClean = abs.split("?")[0].split("#")[0];
     if (assetMap.has(abs)) return assetMap.get(abs);
     if (assetMap.has(absClean)) return assetMap.get(absClean);
@@ -12171,7 +12204,10 @@ function rewriteUrl(value, assetMap, baseUrl) {
       }
     }
     const u = new URL(abs);
-    if (u.origin === new URL(baseUrl).origin) return u.pathname + u.search + u.hash;
+    if (u.origin === new URL(baseUrl).origin) {
+      if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(abs)) return abs;
+      return u.pathname + u.search + u.hash;
+    }
   } catch {
   }
   return value;
@@ -12288,6 +12324,7 @@ function rewriteInlineAssetReferences(text, assetMap) {
   let output = text;
   const entries = [...assetMap.entries()].filter(([from, to]) => from.length > 1 && to && from !== to).sort((a, b) => b[0].length - a[0].length);
   for (const [from, to] of entries) {
+    if (preferLiveMediaEnabled() && isPreferLiveMediaUrl(from)) continue;
     output = replaceAllLiteral(output, from, to);
     const escapedFrom = toEscapedSlash(from);
     if (escapedFrom !== from) {
@@ -13023,4 +13060,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-VTXHOLPU.js.map
+//# sourceMappingURL=chunk-DIBGQL3C.js.map
