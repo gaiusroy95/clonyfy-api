@@ -178,8 +178,8 @@ const ROUTE_FETCH_TIMEOUT = IS_FAST ? 8_000 : 15_000;
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const MAX_ASSET_BYTES = (IS_FAST ? 8 : 50) * 1024 * 1024; // Align with hosted persist cap so heroes survive.
 const MAX_CSS_BYTES = (IS_FAST ? 5 : 25) * 1024 * 1024;
-const SERVERLESS_DOM_ASSET_CAP = 400; // Marketing pages need CSS/fonts + many images.
-const SHOPIFY_DOM_ASSET_CAP = 700;
+const SERVERLESS_DOM_ASSET_CAP = 800; // Save As: harvest more images on hosted.
+const SHOPIFY_DOM_ASSET_CAP = 1200;
 // Upper bound on CSS we scan for url()/image-set()/@import references. The old
 // 500KB limit silently skipped ref-extraction for big bundles (Tailwind/CMS CSS
 // routinely exceeds it), so fonts and background images they referenced never
@@ -294,9 +294,8 @@ function preferLargestSrcsetCandidate(url: string): string {
 }
 
 /**
- * Bake media visibility into captured HTML (site-agnostic).
- * Preview neutralizes site JS, so force eager media load and reveal
- * opacity/visibility-hidden media containers without brand class names.
+ * Save As–level bake: keep text and media visible without site JS.
+ * Mirrors browser "Webpage, Complete" — freeze what was painted, don't re-hide it.
  */
 export function bakeStaticMediaVisibility(html: string): string {
   let out = String(html || '');
@@ -305,7 +304,29 @@ export function bakeStaticMediaVisibility(html: string): string {
   // Prefer eager loading so preview does not wait for IO that never fires.
   out = out.replace(/\sloading=(["'])lazy\1/gi, ' loading="eager"');
 
+  // Strip common "hidden until JS" utility classes from the static snapshot.
+  out = out.replace(
+    /\bclass=(["'])([^"']*)\1/gi,
+    (_m, q, cls) => {
+      const next = String(cls)
+        .replace(/\bopacity-0\b/g, '')
+        .replace(/\binvisible\b/g, '')
+        .replace(/\btranslate-y-(?:\d+|full)\b/g, '')
+        .replace(/\bdelay-\d+\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return `class=${q}${next}${q}`;
+    },
+  );
+
   const bakeCss = `<style id="clonyfy-static-media-bake">
+html,body,#__next,#root{opacity:1!important;visibility:visible!important}
+html.js,html.no-js,body.preload,body.loading,body.no-js{opacity:1!important;visibility:visible!important}
+.opacity-0,[class*="opacity-0"]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important}
+.invisible:not([aria-hidden="true"]){visibility:visible!important}
+[style*="opacity:0"]:not([aria-hidden="true"]),[style*="opacity: 0"]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important}
+[style*="visibility:hidden"]:not([aria-hidden="true"]),[style*="visibility: hidden"]:not([aria-hidden="true"]){visibility:visible!important}
+[data-aos]:not([aria-hidden="true"]),[data-framer-appear-id]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important;transform:none!important}
 img,picture,video,source{opacity:1!important;visibility:visible!important}
 img[hidden],picture[hidden],video[hidden]{display:revert!important}
 </style>`;
@@ -600,11 +621,13 @@ export async function capturePage(
     }
     try {
       const cleanUrl = url.split('?')[0].split('#')[0];
-      const hash = hashUrl(url);
       const extFromPath = extname(new URL(cleanUrl).pathname).toLowerCase();
       const extFromMime = mime.extension(contentType);
       const ext = forceCss ? '.css' : (extFromPath || (extFromMime ? `.${extFromMime}` : '.bin'));
-      const filename = `${hash}${ext}`;
+      // Content-hash filenames: identical bytes from different CDN URLs share one file
+      // and do not double-count against the serverless asset budget.
+      const contentHash = createHash('sha1').update(body).digest('hex').slice(0, 16);
+      const filename = `${contentHash}${ext}`;
       const localPath = join(assetsDir, filename);
       const webPath = `/_assets/${filename}`;
       mkdirSync(assetsDir, { recursive: true });
@@ -615,6 +638,7 @@ export async function capturePage(
         || /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp)(\?|$)/i.test(ext);
       const needsWrite = !existsSync(localPath);
       // Prioritize CSS, fonts, and images so soft budget does not drop visible media.
+      // Existing content-hash file: map URL without reserving more budget.
       if (needsWrite && !reserveServerlessAssetBytes(body.length, { priority: isCss || isFont || isImage })) {
         logger.warn(`  [ASSET BUDGET] Skipping ${url.split('/').pop()} — serverless asset budget (${Math.round(SERVERLESS_ASSET_BUDGET_BYTES / 1024 / 1024)} MB) reached`);
         markFailed(url, 'budget');
@@ -905,8 +929,8 @@ export async function capturePage(
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const step = Math.max(Math.floor(window.innerHeight * 0.7), 320);
     const started = Date.now();
-    const maxSteps = fast ? 22 : 40;
-    const maxMs = fast ? 5_000 : 12_000;
+    const maxSteps = fast ? 22 : 60;
+    const maxMs = fast ? 5_000 : 20_000;
     let y = 0;
     let steps = 0;
     while (y < document.body.scrollHeight && steps < maxSteps && Date.now() - started < maxMs) {
@@ -930,6 +954,24 @@ export async function capturePage(
     logger.debug(`  [SCROLL WARN] ${(err as Error).message}`);
   });
 
+  // Section-aware pass: mount lazy sections that continuous scroll can miss.
+  await page.evaluate(async (fast: boolean) => {
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const blocks = Array.from(document.querySelectorAll(
+      'main section, main > div, [data-section], [data-testid*="section"], article',
+    )).slice(0, fast ? 24 : 48);
+    for (const el of blocks) {
+      try {
+        (el as HTMLElement).scrollIntoView({ block: 'center', inline: 'nearest' });
+      } catch { /* ignore */ }
+      await delay(fast ? 50 : 90);
+    }
+    window.scrollTo(0, 0);
+    await delay(fast ? 40 : 80);
+  }, fastScroll).catch((err) => {
+    logger.debug(`  [SECTION SCROLL WARN] ${(err as Error).message}`);
+  });
+
   // Force below-fold lazy nodes into view so custom loaders populate src/srcset.
   await page.evaluate(async (budget: { maxNodes: number; pauseMs: number }) => {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -944,8 +986,8 @@ export async function capturePage(
     }
     window.scrollTo(0, 0);
   }, {
-    maxNodes: deepMedia ? (IS_FAST ? 100 : 160) : (IS_FAST ? 56 : 60),
-    pauseMs: deepMedia ? (IS_FAST ? 40 : 50) : (IS_FAST ? 25 : 30),
+    maxNodes: deepMedia ? (IS_FAST ? 100 : 200) : (IS_FAST ? 80 : 140),
+    pauseMs: deepMedia ? (IS_FAST ? 40 : 50) : (IS_FAST ? 25 : 35),
   }).catch((err) => {
     logger.debug(`  [SCROLLINTOVIEW WARN] ${(err as Error).message}`);
   });
@@ -1345,17 +1387,15 @@ export async function capturePage(
     }
   }
 
-  // Promote lazy-load attributes to real src/srcset BEFORE snapshotting. Many
-  // lazy-loaders only swap data-src->src via IntersectionObserver, which never
-  // fires for below-fold images in a static snapshot — so the real image (which
-  // we DID download) would render blank. Only promote when the current src is
-  // missing or an obvious placeholder, so already-loaded images keep their value.
+  // Promote lazy-load attributes to real src/srcset BEFORE snapshotting.
+  // Save As level: always prefer data-src / data-srcset when present so images
+  // land in the frozen HTML even if IntersectionObserver never swapped them.
   await page.evaluate(() => {
     const isPlaceholder = (src: string | null): boolean => {
       if (!src) return true;
       const s = src.trim();
       if (!s) return true;
-      if (s.startsWith('data:')) return true; // inline 1x1 / blur placeholder
+      if (s.startsWith('data:')) return true;
       return /(?:^|[/_-])(?:placeholder|blank|spacer|lazy|loading|transparent|pixel|1x1|grey|gray)\b/i.test(s);
     };
     const firstAttr = (el: Element, names: string[]): string | null => {
@@ -1372,15 +1412,17 @@ export async function capturePage(
       };
       const realSrc = firstAttr(el, ['data-src', 'data-lazy-src', 'data-original', 'data-url', 'data-master']);
       const currentSrc = el.getAttribute('src');
-      if (realSrc && (isPlaceholder(currentSrc) || isLowRes(currentSrc))) el.setAttribute('src', realSrc);
+      if (realSrc && (isPlaceholder(currentSrc) || isLowRes(currentSrc) || !currentSrc)) {
+        el.setAttribute('src', realSrc);
+      }
       const realSrcset = firstAttr(el, ['data-srcset', 'data-lazy-srcset']);
-      if (realSrcset && !/^\s*\[/.test(realSrcset) && (!el.getAttribute('srcset') || isPlaceholder(currentSrc) || isLowRes(currentSrc))) {
-        el.setAttribute('srcset', realSrcset);
+      if (realSrcset && !/^\s*\[/.test(realSrcset)) {
+        if (!el.getAttribute('srcset') || isPlaceholder(currentSrc) || isLowRes(currentSrc)) {
+          el.setAttribute('srcset', realSrcset);
+        }
       }
       if (el.getAttribute('loading') === 'lazy') el.setAttribute('loading', 'eager');
     });
-    // data-bg / data-background -> inline background-image for elements whose
-    // background was meant to be injected by a lazy script.
     document.querySelectorAll('[data-bg],[data-background],[data-bg-image],[data-image],[data-lazy-background]').forEach((el) => {
       const bg = firstAttr(el, ['data-bg', 'data-background', 'data-bg-image', 'data-image', 'data-lazy-background']);
       const style = el.getAttribute('style') || '';
@@ -1407,8 +1449,9 @@ export async function capturePage(
     }, undefined, { timeout: deepMedia ? (IS_FAST ? 8_000 : 12_000) : (IS_FAST ? 4_000 : 10_000) });
   } catch { /* partial load is still better than an empty snapshot */ }
 
-  // Rasterize large canvas/WebGL visuals (e.g. Shopify globe) into <img> so static HTML keeps them.
-  if (deepMedia) {
+  // Rasterize large canvas/WebGL visuals into <img> so static HTML keeps them
+  // (Save As cannot run WebGL after JS is neutralized).
+  {
     try {
       const canvasPayloads = await page.evaluate((limit: number) => {
         const out: Array<{ dataUrl: string; width: number; height: number; replaceId: string }> = [];
@@ -1431,18 +1474,18 @@ export async function capturePage(
           }
         }
         return out;
-      }, IS_FAST ? 4 : 8);
+      }, IS_FAST ? 4 : 10);
 
       for (const item of canvasPayloads) {
         try {
           const base64 = item.dataUrl.replace(/^data:image\/png;base64,/, '');
           const buf = Buffer.from(base64, 'base64');
           if (buf.length > maxAssetBytes) continue;
-          const filename = `canvas_${hashUrl(item.replaceId)}.png`;
+          const filename = `canvas_${createHash('sha1').update(buf).digest('hex').slice(0, 16)}.png`;
           const localPath = join(assetsDir, filename);
           const webPath = `/_assets/${filename}`;
           if (!existsSync(localPath)) {
-            if (!reserveServerlessAssetBytes(buf.length)) continue;
+            if (!reserveServerlessAssetBytes(buf.length, { priority: true })) continue;
             writeFileSync(localPath, buf);
             assetsSaved++;
             await notifyArtifactWritten(`public/_assets/${filename}`, localPath);
@@ -1726,7 +1769,7 @@ export async function capturePage(
     }
   }
 
-  await page.evaluate(async (fast: boolean, carouselSkip: string, shopifyDeep: boolean) => {
+  await page.evaluate(async (fast: boolean, carouselSkip: string, _shopifyDeep: boolean) => {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await delay(fast ? 500 : 1500);
 
@@ -1739,27 +1782,6 @@ export async function capturePage(
       const rect = el.getBoundingClientRect();
       return rect.width >= 2 && rect.height >= 2;
     };
-    const overlapsSiblingText = (el: Element): boolean => {
-      const parent = el.parentElement;
-      if (!parent || parent.children.length < 2) return false;
-      const a = el.getBoundingClientRect();
-      if (a.width < 40 || a.height < 16) return false;
-      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (text.length < 2 || text.length > 180) return false;
-      for (const sib of Array.from(parent.children)) {
-        if (sib === el) continue;
-        const st = (sib.textContent || '').replace(/\s+/g, ' ').trim();
-        if (st.length < 2 || st.length > 180) continue;
-        const b = sib.getBoundingClientRect();
-        const ix = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
-        const iy = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
-        const inter = ix * iy;
-        if (inter <= 0) continue;
-        const minArea = Math.min(Math.max(1, a.width * a.height), Math.max(1, b.width * b.height));
-        if (inter / minArea >= 0.45) return true;
-      }
-      return false;
-    };
 
     const shouldResetTransform = (transform: string): boolean => {
       if (!transform || transform === 'none') return false;
@@ -1768,47 +1790,38 @@ export async function capturePage(
       return false;
     };
 
-    const isStackedRotatorPhrase = (el: HTMLElement, cls: string): boolean => {
+    // Save As level: only skip layers carousel normalize already marked inactive.
+    // Do NOT guess "stacked rotator" from short opacity-0 text — that hid real headlines.
+    const isInactiveLayer = (el: HTMLElement): boolean => {
       if (el.getAttribute('aria-hidden') === 'true') return true;
-      if (el.closest('.clonyfy-stacked-rotator,[aria-hidden="true"]')) return true;
-      if (overlapsSiblingText(el)) return true;
-      // Tiny text-only opacity-0 nodes in heroes are usually stacked phrases.
-      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      const hasMedia = !!(el.querySelector && el.querySelector('img,picture,video,source,canvas,svg'));
-      if (/\bopacity-0\b/.test(cls) && !hasMedia && text.length > 0 && text.length < 80) {
-        const r = el.getBoundingClientRect();
-        if (r.height > 0 && r.height < 120) return true;
-      }
+      if (el.closest('[aria-hidden="true"]')) return true;
       return false;
     };
 
-    // Marketing sites: strip reveal-animation utility classes so static HTML is visible.
-    if (shopifyDeep) {
-      document.querySelectorAll('[class*="opacity-0"],[class*="translate-y-"]').forEach((node) => {
-        const el = node as HTMLElement;
-        if (el.closest(carouselSkip)) return;
-        const cls = String(el.className || '');
-        if (isStackedRotatorPhrase(el, cls)) return;
-        el.classList.remove('opacity-0');
-        // Keep transform utilities from permanently hiding sections.
-        for (const c of Array.from(el.classList)) {
-          if (/^translate-y-(?:\d+|full)$/.test(c) || /^delay-\d+$/.test(c)) el.classList.remove(c);
-        }
-        el.style.setProperty('opacity', '1', 'important');
-        el.style.setProperty('visibility', 'visible', 'important');
-        el.style.setProperty('transform', 'none', 'important');
-      });
-    }
+    // All sites: strip reveal-animation utilities so static HTML keeps text/images.
+    document.querySelectorAll('[class*="opacity-0"],[class*="translate-y-"],.invisible').forEach((node) => {
+      const el = node as HTMLElement;
+      if (el.closest(carouselSkip)) return;
+      if (isInactiveLayer(el)) return;
+      el.classList.remove('opacity-0', 'invisible');
+      for (const c of Array.from(el.classList)) {
+        if (/^translate-y-(?:\d+|full)$/.test(c) || /^delay-\d+$/.test(c)) el.classList.remove(c);
+      }
+      el.style.setProperty('opacity', '1', 'important');
+      el.style.setProperty('visibility', 'visible', 'important');
+      el.style.setProperty('transform', 'none', 'important');
+    });
 
-    // Site-agnostic: reveal opacity/visibility-hidden nodes that contain media.
-    // Do not invent brand-specific loaded class names.
     document.querySelectorAll('img[loading="lazy"],source[loading="lazy"]').forEach((node) => {
       const el = node as HTMLImageElement;
       try { el.loading = 'eager'; } catch { /* ignore */ }
     });
+
+    // Reveal media + parents hidden only via opacity/visibility (not display:none breakpoints).
     document.querySelectorAll('img,picture,video').forEach((node) => {
       const el = node as HTMLElement;
       if (el.closest(carouselSkip)) return;
+      if (isInactiveLayer(el)) return;
       const cs = window.getComputedStyle(el);
       if (cs.opacity === '0' || parseFloat(cs.opacity) < 0.05) {
         el.style.setProperty('opacity', '1', 'important');
@@ -1816,10 +1829,10 @@ export async function capturePage(
       if (cs.visibility === 'hidden') {
         el.style.setProperty('visibility', 'visible', 'important');
       }
-      // Walk parents that only hide media (opacity/visibility), not display:none layout switches.
       let parent = el.parentElement;
-      for (let i = 0; parent && i < 4; i++, parent = parent.parentElement) {
+      for (let i = 0; parent && i < 6; i++, parent = parent.parentElement) {
         if (parent.closest(carouselSkip)) break;
+        if (isInactiveLayer(parent)) break;
         const pcs = window.getComputedStyle(parent);
         if (pcs.opacity === '0' || parseFloat(pcs.opacity) < 0.05) {
           parent.style.setProperty('opacity', '1', 'important');
@@ -1830,43 +1843,120 @@ export async function capturePage(
       }
     });
 
+    // Save As: reveal any sized node that is opacity/visibility-hidden (text OR media).
     document.querySelectorAll('*').forEach((node) => {
       const el = node as HTMLElement;
       if (el.closest(carouselSkip)) return;
+      if (isInactiveLayer(el)) return;
       const cls = String(el.className || '');
-      if (isStackedRotatorPhrase(el, cls)) return;
       const style = el.style;
       const cs = window.getComputedStyle(el);
       if (!hasSize(el)) return;
 
-      // Preserve real CSS / WAAPI animations (Shopify marquees, hero motion, etc.)
+      // Preserve continuous marquees/tickers; still force opacity so content isn't blank.
       const animName = String(cs.animationName || '');
       const hasCssAnim = !!animName && animName !== 'none';
-      const hasMotionClass = /\b(animate|motion|marquee|ticker|scroll|parallax|ken-burns|kenburns)\b/i.test(cls);
-      if (hasCssAnim || hasMotionClass) return;
+      const hasMotionClass = /\b(marquee|ticker|ken-burns|kenburns)\b/i.test(cls);
 
-      // Reveal Tailwind opacity-0 sections (brochure cards) — previously skipped entirely.
-      if (/\bopacity-0\b/.test(cls)) {
-        el.classList.remove('opacity-0');
+      if (/\bopacity-0\b/.test(cls) || /\binvisible\b/.test(cls)) {
+        el.classList.remove('opacity-0', 'invisible');
+        style.setProperty('opacity', '1', 'important');
+        style.setProperty('visibility', 'visible', 'important');
+      }
+
+      if (isZeroOpacity(style.opacity) || parseFloat(cs.opacity) <= 0.01) {
         style.setProperty('opacity', '1', 'important');
       }
-
-      if (isZeroOpacity(style.opacity)) {
-        const computed = parseFloat(cs.opacity);
-        style.opacity = computed > 0.05 ? String(computed) : '1';
-      } else if (parseFloat(cs.opacity) <= 0.01) {
-        style.opacity = '1';
-      }
       if (style.visibility === 'hidden' || cs.visibility === 'hidden') {
-        style.visibility = 'visible';
+        style.setProperty('visibility', 'visible', 'important');
       }
 
-      const transform = style.transform || cs.transform;
-      if (shouldResetTransform(transform)) style.transform = 'none';
+      if (!hasCssAnim && !hasMotionClass) {
+        const transform = style.transform || cs.transform;
+        if (shouldResetTransform(transform)) style.transform = 'none';
+      }
+
+      if (el.hasAttribute('data-aos')) {
+        el.classList.add('aos-animate');
+        style.setProperty('transform', 'none', 'important');
+      }
     });
   }, fastScroll, CAROUSEL_SKIP_SELECTOR, deepMedia).catch((err) => {
     logger.debug(`  [VISIBILITY FREEZE WARN] ${(err as Error).message}`);
   });
+
+  // Visual freeze: screenshot empty JS graphic shells (Lottie/bento/animation hosts
+  // with size but no <img>) and replace with a still — Save As cannot run those players.
+  try {
+    const shellIds = await page.evaluate((limit: number) => {
+      const ids: string[] = [];
+      const skip = 'nav,header,footer,[role="navigation"],script,style,noscript';
+      const nodes = Array.from(document.querySelectorAll('div,section,figure,span,aside'));
+      for (const node of nodes) {
+        if (ids.length >= limit) break;
+        const el = node as HTMLElement;
+        if (el.closest(skip)) continue;
+        if (el.getAttribute('aria-hidden') === 'true') continue;
+        if (el.querySelector('img,picture,video,canvas,iframe,svg')) continue;
+        const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
+        if (text.length > 40) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 140 || rect.height < 120) continue;
+        if (rect.width > 2400 || rect.height > 1800) continue;
+        const cs = window.getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
+        const cls = String(el.className || '');
+        const looksGraphic = /lottie|graphic|animation|bento|hero.?media|visual|illustration|rive|spline|canvas|globe|scene/i.test(cls)
+          || /lottie|graphic|animation/i.test(el.id || '');
+        // Large empty painted boxes also count (background-only heroes).
+        const hasBg = /url\(|gradient/i.test(cs.backgroundImage) || (cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent');
+        if (!looksGraphic && !(hasBg && rect.height >= 180 && text.length < 8)) continue;
+        // Prefer leaf-ish shells: not wrapping the whole page.
+        if (el.querySelectorAll('div').length > 12) continue;
+        const id = `clonyfy-shell-${ids.length}-${Date.now()}`;
+        el.setAttribute('data-clonyfy-shell-id', id);
+        ids.push(id);
+      }
+      return ids;
+    }, IS_FAST ? 4 : 8);
+
+    for (const shellId of shellIds) {
+      try {
+        const loc = page.locator(`[data-clonyfy-shell-id="${shellId}"]`).first();
+        if (!(await loc.count())) continue;
+        const buf = await loc.screenshot({ type: 'png', timeout: 4000 });
+        if (!buf || buf.length < 800) continue;
+        if (buf.length > maxAssetBytes) continue;
+        if (!reserveServerlessAssetBytes(buf.length, { priority: true })) continue;
+        const filename = `shell_${createHash('sha1').update(buf).digest('hex').slice(0, 16)}.png`;
+        const localPath = join(assetsDir, filename);
+        const webPath = `/_assets/${filename}`;
+        if (!existsSync(localPath)) {
+          writeFileSync(localPath, buf);
+          assetsSaved++;
+          await notifyArtifactWritten(`public/_assets/${filename}`, localPath);
+        }
+        assetMap.set(webPath, webPath);
+        await page.evaluate(({ shellId, webPath }) => {
+          const el = document.querySelector(`[data-clonyfy-shell-id="${shellId}"]`) as HTMLElement | null;
+          if (!el) return;
+          const rect = el.getBoundingClientRect();
+          const img = document.createElement('img');
+          img.src = webPath;
+          img.alt = '';
+          img.setAttribute('data-clonyfy-shell-capture', '1');
+          img.style.cssText = `display:block;width:100%;height:auto;max-width:100%;object-fit:cover;`;
+          if (rect.height > 0) img.style.minHeight = `${Math.round(rect.height)}px`;
+          el.replaceChildren(img);
+        }, { shellId, webPath });
+        logger.debug(`  [SHELL CAPTURE] ${shellId} -> ${webPath} (${(buf.length / 1024).toFixed(1)}KB)`);
+      } catch (err) {
+        logger.debug(`  [SHELL CAPTURE WARN] ${shellId}: ${(err as Error).message}`);
+      }
+    }
+  } catch (err) {
+    logger.debug(`  [SHELL SCAN WARN] ${(err as Error).message}`);
+  }
 
   await page.evaluate(normalizeAllMotionStacksInDocument).catch((err) => {
     logger.debug(`  [CAROUSEL NORMALIZE WARN] ${(err as Error).message}`);

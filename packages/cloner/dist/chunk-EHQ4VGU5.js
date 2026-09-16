@@ -1364,8 +1364,8 @@ var ROUTE_FETCH_TIMEOUT = IS_FAST ? 8e3 : 15e3;
 var USER_AGENT2 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 var MAX_ASSET_BYTES = (IS_FAST ? 8 : 50) * 1024 * 1024;
 var MAX_CSS_BYTES = (IS_FAST ? 5 : 25) * 1024 * 1024;
-var SERVERLESS_DOM_ASSET_CAP = 400;
-var SHOPIFY_DOM_ASSET_CAP = 700;
+var SERVERLESS_DOM_ASSET_CAP = 800;
+var SHOPIFY_DOM_ASSET_CAP = 1200;
 var CSS_REF_SCAN_MAX_BYTES = 4 * 1024 * 1024;
 var MARKETING_HOST_SUFFIXES = [
   "shopify.com",
@@ -1452,7 +1452,21 @@ function bakeStaticMediaVisibility(html) {
   let out = String(html || "");
   if (!out || /id=["']clonyfy-static-media-bake["']/.test(out)) return out;
   out = out.replace(/\sloading=(["'])lazy\1/gi, ' loading="eager"');
+  out = out.replace(
+    /\bclass=(["'])([^"']*)\1/gi,
+    (_m, q, cls) => {
+      const next = String(cls).replace(/\bopacity-0\b/g, "").replace(/\binvisible\b/g, "").replace(/\btranslate-y-(?:\d+|full)\b/g, "").replace(/\bdelay-\d+\b/g, "").replace(/\s+/g, " ").trim();
+      return `class=${q}${next}${q}`;
+    }
+  );
   const bakeCss = `<style id="clonyfy-static-media-bake">
+html,body,#__next,#root{opacity:1!important;visibility:visible!important}
+html.js,html.no-js,body.preload,body.loading,body.no-js{opacity:1!important;visibility:visible!important}
+.opacity-0,[class*="opacity-0"]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important}
+.invisible:not([aria-hidden="true"]){visibility:visible!important}
+[style*="opacity:0"]:not([aria-hidden="true"]),[style*="opacity: 0"]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important}
+[style*="visibility:hidden"]:not([aria-hidden="true"]),[style*="visibility: hidden"]:not([aria-hidden="true"]){visibility:visible!important}
+[data-aos]:not([aria-hidden="true"]),[data-framer-appear-id]:not([aria-hidden="true"]){opacity:1!important;visibility:visible!important;transform:none!important}
 img,picture,video,source{opacity:1!important;visibility:visible!important}
 img[hidden],picture[hidden],video[hidden]{display:revert!important}
 </style>`;
@@ -1686,11 +1700,11 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     }
     try {
       const cleanUrl = url.split("?")[0].split("#")[0];
-      const hash = hashUrl(url);
       const extFromPath = extname2(new URL(cleanUrl).pathname).toLowerCase();
       const extFromMime = mime.extension(contentType);
       const ext = forceCss ? ".css" : extFromPath || (extFromMime ? `.${extFromMime}` : ".bin");
-      const filename = `${hash}${ext}`;
+      const contentHash = createHash("sha1").update(body).digest("hex").slice(0, 16);
+      const filename = `${contentHash}${ext}`;
       const localPath = join3(assetsDir, filename);
       const webPath = `/_assets/${filename}`;
       mkdirSync3(assetsDir, { recursive: true });
@@ -1932,8 +1946,8 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       const delay = (ms) => new Promise((r) => setTimeout(r, ms));
       const step = Math.max(Math.floor(window.innerHeight * 0.7), 320);
       const started = Date.now();
-      const maxSteps = fast ? 22 : 40;
-      const maxMs = fast ? 5e3 : 12e3;
+      const maxSteps = fast ? 22 : 60;
+      const maxMs = fast ? 5e3 : 2e4;
       let y = 0;
       let steps = 0;
       while (y < document.body.scrollHeight && steps < maxSteps && Date.now() - started < maxMs) {
@@ -1955,6 +1969,23 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
     }, fastScroll).catch((err) => {
       logger.debug(`  [SCROLL WARN] ${err.message}`);
     });
+    await page.evaluate(async (fast) => {
+      const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+      const blocks = Array.from(document.querySelectorAll(
+        'main section, main > div, [data-section], [data-testid*="section"], article'
+      )).slice(0, fast ? 24 : 48);
+      for (const el of blocks) {
+        try {
+          el.scrollIntoView({ block: "center", inline: "nearest" });
+        } catch {
+        }
+        await delay(fast ? 50 : 90);
+      }
+      window.scrollTo(0, 0);
+      await delay(fast ? 40 : 80);
+    }, fastScroll).catch((err) => {
+      logger.debug(`  [SECTION SCROLL WARN] ${err.message}`);
+    });
     await page.evaluate(async (budget) => {
       const delay = (ms) => new Promise((r) => setTimeout(r, ms));
       const nodes = Array.from(document.querySelectorAll(
@@ -1969,8 +2000,8 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       }
       window.scrollTo(0, 0);
     }, {
-      maxNodes: deepMedia ? IS_FAST ? 100 : 160 : IS_FAST ? 56 : 60,
-      pauseMs: deepMedia ? IS_FAST ? 40 : 50 : IS_FAST ? 25 : 30
+      maxNodes: deepMedia ? IS_FAST ? 100 : 200 : IS_FAST ? 80 : 140,
+      pauseMs: deepMedia ? IS_FAST ? 40 : 50 : IS_FAST ? 25 : 35
     }).catch((err) => {
       logger.debug(`  [SCROLLINTOVIEW WARN] ${err.message}`);
     });
@@ -2362,10 +2393,14 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         };
         const realSrc = firstAttr(el, ["data-src", "data-lazy-src", "data-original", "data-url", "data-master"]);
         const currentSrc = el.getAttribute("src");
-        if (realSrc && (isPlaceholder(currentSrc) || isLowRes(currentSrc))) el.setAttribute("src", realSrc);
+        if (realSrc && (isPlaceholder(currentSrc) || isLowRes(currentSrc) || !currentSrc)) {
+          el.setAttribute("src", realSrc);
+        }
         const realSrcset = firstAttr(el, ["data-srcset", "data-lazy-srcset"]);
-        if (realSrcset && !/^\s*\[/.test(realSrcset) && (!el.getAttribute("srcset") || isPlaceholder(currentSrc) || isLowRes(currentSrc))) {
-          el.setAttribute("srcset", realSrcset);
+        if (realSrcset && !/^\s*\[/.test(realSrcset)) {
+          if (!el.getAttribute("srcset") || isPlaceholder(currentSrc) || isLowRes(currentSrc)) {
+            el.setAttribute("srcset", realSrcset);
+          }
         }
         if (el.getAttribute("loading") === "lazy") el.setAttribute("loading", "eager");
       });
@@ -2392,7 +2427,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       }, void 0, { timeout: deepMedia ? IS_FAST ? 8e3 : 12e3 : IS_FAST ? 4e3 : 1e4 });
     } catch {
     }
-    if (deepMedia) {
+    {
       try {
         const canvasPayloads = await page.evaluate((limit) => {
           const out = [];
@@ -2414,17 +2449,17 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
             }
           }
           return out;
-        }, IS_FAST ? 4 : 8);
+        }, IS_FAST ? 4 : 10);
         for (const item of canvasPayloads) {
           try {
             const base64 = item.dataUrl.replace(/^data:image\/png;base64,/, "");
             const buf = Buffer.from(base64, "base64");
             if (buf.length > maxAssetBytes) continue;
-            const filename = `canvas_${hashUrl(item.replaceId)}.png`;
+            const filename = `canvas_${createHash("sha1").update(buf).digest("hex").slice(0, 16)}.png`;
             const localPath = join3(assetsDir, filename);
             const webPath = `/_assets/${filename}`;
             if (!existsSync2(localPath)) {
-              if (!reserveServerlessAssetBytes(buf.length)) continue;
+              if (!reserveServerlessAssetBytes(buf.length, { priority: true })) continue;
               writeFileSync2(localPath, buf);
               assetsSaved++;
               await notifyArtifactWritten(`public/_assets/${filename}`, localPath);
@@ -2695,7 +2730,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         logger.warn(`  [SHOPIFY DEEP MEDIA WARN] ${deepErr.message} \u2014 continuing with base snapshot`);
       }
     }
-    await page.evaluate(async (fast, carouselSkip, shopifyDeep) => {
+    await page.evaluate(async (fast, carouselSkip, _shopifyDeep) => {
       const delay = (ms) => new Promise((r) => setTimeout(r, ms));
       await delay(fast ? 500 : 1500);
       const isZeroOpacity = (value) => {
@@ -2707,60 +2742,29 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
         const rect = el.getBoundingClientRect();
         return rect.width >= 2 && rect.height >= 2;
       };
-      const overlapsSiblingText = (el) => {
-        const parent = el.parentElement;
-        if (!parent || parent.children.length < 2) return false;
-        const a = el.getBoundingClientRect();
-        if (a.width < 40 || a.height < 16) return false;
-        const text = (el.textContent || "").replace(/\s+/g, " ").trim();
-        if (text.length < 2 || text.length > 180) return false;
-        for (const sib of Array.from(parent.children)) {
-          if (sib === el) continue;
-          const st = (sib.textContent || "").replace(/\s+/g, " ").trim();
-          if (st.length < 2 || st.length > 180) continue;
-          const b = sib.getBoundingClientRect();
-          const ix = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
-          const iy = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
-          const inter = ix * iy;
-          if (inter <= 0) continue;
-          const minArea = Math.min(Math.max(1, a.width * a.height), Math.max(1, b.width * b.height));
-          if (inter / minArea >= 0.45) return true;
-        }
-        return false;
-      };
       const shouldResetTransform = (transform) => {
         if (!transform || transform === "none") return false;
         if (/translateY\([^)]*-?\d{2,}/.test(transform)) return true;
         if (/translate3d\([^)]*,\s*-?\d{2,}/.test(transform)) return true;
         return false;
       };
-      const isStackedRotatorPhrase = (el, cls) => {
+      const isInactiveLayer = (el) => {
         if (el.getAttribute("aria-hidden") === "true") return true;
-        if (el.closest('.clonyfy-stacked-rotator,[aria-hidden="true"]')) return true;
-        if (overlapsSiblingText(el)) return true;
-        const text = (el.textContent || "").replace(/\s+/g, " ").trim();
-        const hasMedia = !!(el.querySelector && el.querySelector("img,picture,video,source,canvas,svg"));
-        if (/\bopacity-0\b/.test(cls) && !hasMedia && text.length > 0 && text.length < 80) {
-          const r = el.getBoundingClientRect();
-          if (r.height > 0 && r.height < 120) return true;
-        }
+        if (el.closest('[aria-hidden="true"]')) return true;
         return false;
       };
-      if (shopifyDeep) {
-        document.querySelectorAll('[class*="opacity-0"],[class*="translate-y-"]').forEach((node) => {
-          const el = node;
-          if (el.closest(carouselSkip)) return;
-          const cls = String(el.className || "");
-          if (isStackedRotatorPhrase(el, cls)) return;
-          el.classList.remove("opacity-0");
-          for (const c of Array.from(el.classList)) {
-            if (/^translate-y-(?:\d+|full)$/.test(c) || /^delay-\d+$/.test(c)) el.classList.remove(c);
-          }
-          el.style.setProperty("opacity", "1", "important");
-          el.style.setProperty("visibility", "visible", "important");
-          el.style.setProperty("transform", "none", "important");
-        });
-      }
+      document.querySelectorAll('[class*="opacity-0"],[class*="translate-y-"],.invisible').forEach((node) => {
+        const el = node;
+        if (el.closest(carouselSkip)) return;
+        if (isInactiveLayer(el)) return;
+        el.classList.remove("opacity-0", "invisible");
+        for (const c of Array.from(el.classList)) {
+          if (/^translate-y-(?:\d+|full)$/.test(c) || /^delay-\d+$/.test(c)) el.classList.remove(c);
+        }
+        el.style.setProperty("opacity", "1", "important");
+        el.style.setProperty("visibility", "visible", "important");
+        el.style.setProperty("transform", "none", "important");
+      });
       document.querySelectorAll('img[loading="lazy"],source[loading="lazy"]').forEach((node) => {
         const el = node;
         try {
@@ -2771,6 +2775,7 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       document.querySelectorAll("img,picture,video").forEach((node) => {
         const el = node;
         if (el.closest(carouselSkip)) return;
+        if (isInactiveLayer(el)) return;
         const cs = window.getComputedStyle(el);
         if (cs.opacity === "0" || parseFloat(cs.opacity) < 0.05) {
           el.style.setProperty("opacity", "1", "important");
@@ -2779,8 +2784,9 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
           el.style.setProperty("visibility", "visible", "important");
         }
         let parent = el.parentElement;
-        for (let i = 0; parent && i < 4; i++, parent = parent.parentElement) {
+        for (let i = 0; parent && i < 6; i++, parent = parent.parentElement) {
           if (parent.closest(carouselSkip)) break;
+          if (isInactiveLayer(parent)) break;
           const pcs = window.getComputedStyle(parent);
           if (pcs.opacity === "0" || parseFloat(pcs.opacity) < 0.05) {
             parent.style.setProperty("opacity", "1", "important");
@@ -2793,34 +2799,103 @@ async function capturePage(context, pageUrl, assetsDir, hooks = {}) {
       document.querySelectorAll("*").forEach((node) => {
         const el = node;
         if (el.closest(carouselSkip)) return;
+        if (isInactiveLayer(el)) return;
         const cls = String(el.className || "");
-        if (isStackedRotatorPhrase(el, cls)) return;
         const style = el.style;
         const cs = window.getComputedStyle(el);
         if (!hasSize(el)) return;
         const animName = String(cs.animationName || "");
         const hasCssAnim = !!animName && animName !== "none";
-        const hasMotionClass = /\b(animate|motion|marquee|ticker|scroll|parallax|ken-burns|kenburns)\b/i.test(cls);
-        if (hasCssAnim || hasMotionClass) return;
-        if (/\bopacity-0\b/.test(cls)) {
-          el.classList.remove("opacity-0");
+        const hasMotionClass = /\b(marquee|ticker|ken-burns|kenburns)\b/i.test(cls);
+        if (/\bopacity-0\b/.test(cls) || /\binvisible\b/.test(cls)) {
+          el.classList.remove("opacity-0", "invisible");
+          style.setProperty("opacity", "1", "important");
+          style.setProperty("visibility", "visible", "important");
+        }
+        if (isZeroOpacity(style.opacity) || parseFloat(cs.opacity) <= 0.01) {
           style.setProperty("opacity", "1", "important");
         }
-        if (isZeroOpacity(style.opacity)) {
-          const computed = parseFloat(cs.opacity);
-          style.opacity = computed > 0.05 ? String(computed) : "1";
-        } else if (parseFloat(cs.opacity) <= 0.01) {
-          style.opacity = "1";
-        }
         if (style.visibility === "hidden" || cs.visibility === "hidden") {
-          style.visibility = "visible";
+          style.setProperty("visibility", "visible", "important");
         }
-        const transform = style.transform || cs.transform;
-        if (shouldResetTransform(transform)) style.transform = "none";
+        if (!hasCssAnim && !hasMotionClass) {
+          const transform = style.transform || cs.transform;
+          if (shouldResetTransform(transform)) style.transform = "none";
+        }
+        if (el.hasAttribute("data-aos")) {
+          el.classList.add("aos-animate");
+          style.setProperty("transform", "none", "important");
+        }
       });
     }, fastScroll, CAROUSEL_SKIP_SELECTOR, deepMedia).catch((err) => {
       logger.debug(`  [VISIBILITY FREEZE WARN] ${err.message}`);
     });
+    try {
+      const shellIds = await page.evaluate((limit) => {
+        const ids = [];
+        const skip = 'nav,header,footer,[role="navigation"],script,style,noscript';
+        const nodes = Array.from(document.querySelectorAll("div,section,figure,span,aside"));
+        for (const node of nodes) {
+          if (ids.length >= limit) break;
+          const el = node;
+          if (el.closest(skip)) continue;
+          if (el.getAttribute("aria-hidden") === "true") continue;
+          if (el.querySelector("img,picture,video,canvas,iframe,svg")) continue;
+          const text = (el.innerText || "").replace(/\s+/g, " ").trim();
+          if (text.length > 40) continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 140 || rect.height < 120) continue;
+          if (rect.width > 2400 || rect.height > 1800) continue;
+          const cs = window.getComputedStyle(el);
+          if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.05) continue;
+          const cls = String(el.className || "");
+          const looksGraphic = /lottie|graphic|animation|bento|hero.?media|visual|illustration|rive|spline|canvas|globe|scene/i.test(cls) || /lottie|graphic|animation/i.test(el.id || "");
+          const hasBg = /url\(|gradient/i.test(cs.backgroundImage) || cs.backgroundColor && cs.backgroundColor !== "rgba(0, 0, 0, 0)" && cs.backgroundColor !== "transparent";
+          if (!looksGraphic && !(hasBg && rect.height >= 180 && text.length < 8)) continue;
+          if (el.querySelectorAll("div").length > 12) continue;
+          const id = `clonyfy-shell-${ids.length}-${Date.now()}`;
+          el.setAttribute("data-clonyfy-shell-id", id);
+          ids.push(id);
+        }
+        return ids;
+      }, IS_FAST ? 4 : 8);
+      for (const shellId of shellIds) {
+        try {
+          const loc = page.locator(`[data-clonyfy-shell-id="${shellId}"]`).first();
+          if (!await loc.count()) continue;
+          const buf = await loc.screenshot({ type: "png", timeout: 4e3 });
+          if (!buf || buf.length < 800) continue;
+          if (buf.length > maxAssetBytes) continue;
+          if (!reserveServerlessAssetBytes(buf.length, { priority: true })) continue;
+          const filename = `shell_${createHash("sha1").update(buf).digest("hex").slice(0, 16)}.png`;
+          const localPath = join3(assetsDir, filename);
+          const webPath = `/_assets/${filename}`;
+          if (!existsSync2(localPath)) {
+            writeFileSync2(localPath, buf);
+            assetsSaved++;
+            await notifyArtifactWritten(`public/_assets/${filename}`, localPath);
+          }
+          assetMap.set(webPath, webPath);
+          await page.evaluate(({ shellId: shellId2, webPath: webPath2 }) => {
+            const el = document.querySelector(`[data-clonyfy-shell-id="${shellId2}"]`);
+            if (!el) return;
+            const rect = el.getBoundingClientRect();
+            const img = document.createElement("img");
+            img.src = webPath2;
+            img.alt = "";
+            img.setAttribute("data-clonyfy-shell-capture", "1");
+            img.style.cssText = `display:block;width:100%;height:auto;max-width:100%;object-fit:cover;`;
+            if (rect.height > 0) img.style.minHeight = `${Math.round(rect.height)}px`;
+            el.replaceChildren(img);
+          }, { shellId, webPath });
+          logger.debug(`  [SHELL CAPTURE] ${shellId} -> ${webPath} (${(buf.length / 1024).toFixed(1)}KB)`);
+        } catch (err) {
+          logger.debug(`  [SHELL CAPTURE WARN] ${shellId}: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      logger.debug(`  [SHELL SCAN WARN] ${err.message}`);
+    }
     await page.evaluate(normalizeAllMotionStacksInDocument).catch((err) => {
       logger.debug(`  [CAROUSEL NORMALIZE WARN] ${err.message}`);
     });
@@ -13128,4 +13203,4 @@ export {
   runClone,
   regenerateCloneProject
 };
-//# sourceMappingURL=chunk-UB6MNXPI.js.map
+//# sourceMappingURL=chunk-EHQ4VGU5.js.map

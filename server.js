@@ -2202,12 +2202,11 @@ function previewVisibilityFix(baseHref = '/') {
 }
 
 async function rewritePreviewAssetUrls(html, outDir, options = {}) {
-  const qualityOn = process.env.CLONYFY_QUALITY !== '0' && process.env.CLONYFY_QUALITY !== 'false';
   const {
     baseHref = '/',
     injectPreviewNav = true,
-    // Quality clones already freeze post-scroll visibility; fake scroll-reveal fights real motion.
-    injectScrollReveal = !qualityOn && process.env.CLONYFY_SCROLL_REVEAL !== '0',
+    // Save As level: never re-hide text with fake scroll-reveal unless explicitly opted in.
+    injectScrollReveal = process.env.CLONYFY_SCROLL_REVEAL === '1' || process.env.CLONYFY_SCROLL_REVEAL === 'true',
     assetContext = null,
   } = options;
   let out = bakeStaticMediaVisibilityHtml(rewriteBareAssetUrls(html, outDir));
